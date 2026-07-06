@@ -89,7 +89,7 @@ jobs:
           restore-keys: ccache-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: Install toolchain + deps
-        run: brew install ccache libtool automake pkg-config wxwidgets
+        run: brew install ccache libtool automake pkg-config wxwidgets dylibbundler
 
       - name: Build ZenLib + patched MediaInfoLib
         if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
