@@ -21,18 +21,16 @@ curl -fsSL "$url" -o wx.tar.bz2
 tar xf wx.tar.bz2
 cd "wxWidgets-${WX_VERSION}"
 
-# Static, universal, no shared. Disable the pieces the MediaInfo GUI never uses to keep it lean and
-# avoid pulling extra system frameworks. --disable-sys-libs would rebuild image libs; we keep system
-# ones (the app bundles nothing here since wx is static).
+# Static (wx uses --disable-shared for that; there is no --enable-static), universal. Disable the
+# pieces the MediaInfo GUI never uses to keep it lean. --enable-universal_binary builds a fat lib.
 ./configure \
   --prefix="$WX_PREFIX" \
+  --disable-shared \
   --enable-unicode \
-  --disable-shared --enable-static \
   --enable-universal_binary=arm64,x86_64 \
   --with-macosx-version-min=11.0 \
-  --without-subdirs \
   --disable-sound --disable-mediactrl \
-  --disable-webview --disable-webviewwebkit
+  --disable-webview
 
 make -j"$jobs"
 make install
