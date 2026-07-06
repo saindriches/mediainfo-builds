@@ -1,4 +1,4 @@
-# mediainfo-build
+# mediainfo-builds
 
 Builds [MediaInfo](https://github.com/MediaArea/MediaInfo) (the `mediainfo` CLI, plus a
 `MediaInfo.app` wxWidgets GUI on macOS) from its three official source repos with the **File_MmtTlv
@@ -30,37 +30,46 @@ GUI against it.
 
 | platform | runner | output |
 |---|---|---|
-| macOS arm64 | `macos-14` | `mediainfo` CLI + `MediaInfo.app` (wx GUI) |
-| macOS x86_64 | `macos-13` | `mediainfo` CLI + `MediaInfo.app` (wx GUI) |
+| macOS universal2 | `macos-14` | `mediainfo` CLI + `MediaInfo.app` (wx GUI), both arm64 + x86_64 in one binary |
 | Linux x86_64 | `ubuntu-latest` | `mediainfo` CLI |
-| Windows x86_64 | `windows-latest` | scaffold (MSVC solution wiring pending) |
+| Windows x64 | `windows-latest` | `mediainfo.exe` CLI (CMake / MSVC) |
+
+macOS is built once on Apple Silicon as a **universal2** binary (arm64 + x86_64 via `lipo`), so a
+single `mediainfo` and one `MediaInfo.app` run on both architectures. This sidesteps the
+now-unreliable macos-13 Intel runners.
 
 `MediaInfo.app` is the wxWidgets `mediainfo-gui` wrapped into a bundle, mirroring the GUI path of
-the official `Project/Mac/Make_MI_dmg.sh` (Info.plist + icon from `Project/Mac/`). macOS binaries
-are ad-hoc signed (not notarized), fine for personal use.
+the official `Project/Mac/Make_MI_dmg.sh` (Info.plist + icon from `Project/Mac/`). wxWidgets is
+built static and universal from source, so the app carries no wx dylib. macOS binaries are ad-hoc
+signed (not notarized), fine for personal use.
+
+Windows uses the official CMake CLI path (`Project/CMake/CLI/`): CMake FetchContent pulls
+`MediaArea/ZenLib` and `MediaArea/zlib`, and our patched MediaInfoLib is compiled in from the
+sibling checkout, producing a static, self-contained `mediainfo.exe`.
 
 ## Use
 
 Download the artifact for your platform (or a published Release), then:
 
 ```sh
-tar xf mediainfo-cli-macos-arm64.tar.xz
+tar xf mediainfo-cli-macos-universal.tar.xz
 ./mediainfo somefile.mmts
 
-tar xf MediaInfo-gui-macos-arm64.tar.xz
+tar xf MediaInfo-gui-macos-universal.tar.xz
 xattr -dr com.apple.quarantine MediaInfo.app   # clear Gatekeeper
 open MediaInfo.app
 ```
 
 ## Caching (fast iteration)
 
-Two layers, so re-runs are cheap:
+Three layers, so re-runs are cheap:
 
-1. **Deps prefix**: the built ZenLib + patched MediaInfoLib (`deps-prefix/`) is cached, keyed on the
-   pinned refs and a hash of `patches/mediainfolib/*.patch`. It rebuilds only when a patch or a ref
-   changes; a CLI/GUI-only iteration restores it in seconds. `build-deps.sh` is idempotent, so a
-   cache hit is free.
-2. **ccache**: accelerates recompiles, keyed per platform with a rolling `restore-keys`.
+1. **Built deps**: ZenLib + patched MediaInfoLib built in place are cached, keyed on the pinned refs
+   and a hash of `patches/mediainfolib/*.patch`. They rebuild only when a patch or a ref changes; a
+   CLI/GUI-only iteration restores them in seconds. `build-deps.sh` is idempotent, so a cache hit is
+   free.
+2. **wxWidgets prefix** (macOS): the static universal wx build, keyed on `WX_VERSION`.
+3. **ccache**: accelerates recompiles, keyed per platform with a rolling `restore-keys`.
 
 Force a full deps rebuild with the `force_rebuild_deps` dispatch input, or bump `CACHE_EPOCH`.
 
@@ -72,7 +81,7 @@ GitHub Release tagged `build-<run number>`.
 ## Pinned inputs
 
 See [`manifest.env`](manifest.env): `ZENLIB_REF`, `MEDIAINFOLIB_REF` (the base our patches target),
-`MEDIAINFO_REF`, `MEDIAINFO_VERSION`, `CACHE_EPOCH`.
+`MEDIAINFO_REF`, `MEDIAINFO_VERSION`, `WX_VERSION`, `MACOS_ARCHS`, `CACHE_EPOCH`.
 
 ## Adding a patch
 
@@ -81,5 +90,5 @@ to the MediaInfoLib source in order before it builds.
 
 ## Status
 
-macOS (CLI + GUI) and Linux (CLI) are the intended paths. Windows is a scaffold. First CI runs may
-need fixups; GitHub Actions cannot be validated locally.
+macOS (universal CLI + GUI), Linux (CLI), and Windows (CLI) all build in CI. First CI runs may need
+fixups; GitHub Actions cannot be validated locally.

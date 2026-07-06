@@ -5,13 +5,17 @@ name: build
 # applied to MediaInfoLib. Those patches add the File_MmtTlv MMT/TLV parser, so mediainfo reports
 # assets, codecs, EIT, service, audio, and scramble state from ISDB-S3 4K/8K .mmts files.
 #
-# Caching, so iterating is cheap:
-#   1. The built ZenLib + patched MediaInfoLib prefix (deps-prefix/) is cached, keyed on the patch
-#      set + the pinned refs. It rebuilds only when a patch or a ref changes; a CLI/GUI-only change
-#      restores it in seconds (build-deps.sh is idempotent, so a cache hit is free).
-#   2. ccache accelerates recompiles, keyed per platform with a rolling restore-key.
+#   macOS   : one universal2 (arm64 + x86_64) build on Apple Silicon, so a single mediainfo and one
+#             MediaInfo.app run on both architectures. No fragile Intel runner.
+#   Linux   : native x86_64 CLI (autotools).
+#   Windows : x64 CLI via the official CMake path (MSVC), FetchContent pulls ZenLib + zlib.
 #
-# On an all-jobs-success run the release job publishes the artifacts to a GitHub Release.
+# Caching, so iterating is cheap:
+#   1. Built ZenLib + patched MediaInfoLib (in place), keyed on the patch set + pinned refs + archs.
+#   2. Static universal wxWidgets prefix (macOS GUI), keyed on the wx version.
+#   3. ccache for recompiles.
+#
+# On an all-build-jobs-success run the release job publishes the artifacts to a GitHub Release.
 
 on:
   push:
@@ -36,25 +40,23 @@ env:
   MEDIAINFOLIB_REF: "dd11d7971107e1b554e41ed446387d22cb3198e9"
   MEDIAINFO_REF: "d327f8fe76208f0b70bc08e4b55dca508991500d"
   MEDIAINFO_VERSION: "26.05"
-  CACHE_EPOCH: "2"
+  WX_VERSION: "3.2.6"
+  MACOS_ARCHS: "arm64 x86_64"
+  CACHE_EPOCH: "3"
 
 jobs:
-  # ---------------------------------------------------------------- macOS (arm64 + x86_64) -------
+  # ---------------------------------------------------------------- macOS (universal2) -----------
   macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-14, arch: arm64 }
-          - { os: macos-13, arch: x86_64 }
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: "800M"
+      CCACHE_MAXSIZE: "1G"
       HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
     steps:
-      - uses: actions/checkout@v4
+      - name: Set prefixes outside the workspace
+        run: echo "WX_PREFIX=$RUNNER_TEMP/wxprefix" >> "$GITHUB_ENV"
 
+      - uses: actions/checkout@v4
       - name: Checkout ZenLib
         uses: actions/checkout@v4
         with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_REF }}", path: ZenLib }
@@ -69,9 +71,7 @@ jobs:
         id: keys
         run: echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
-      # Cache the two built source trees in place; the CLI/GUI find them via the sibling paths the
-      # official build expects. build-deps.sh is idempotent, so a hit skips the rebuild.
-      - name: Restore built deps
+      - name: Restore built deps (ZenLib + MediaInfoLib)
         id: depcache
         if: ${{ github.event.inputs.force_rebuild_deps != 'true' }}
         uses: actions/cache@v4
@@ -79,50 +79,64 @@ jobs:
           path: |
             ZenLib
             MediaInfoLib
-          key: deps-${{ matrix.os }}-${{ matrix.arch }}-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+          key: deps-macos-uni-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+
+      - name: Restore wxWidgets prefix
+        id: wxcache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WX_PREFIX }}
+          key: wx-macos-uni-${{ env.WX_VERSION }}-epoch${{ env.CACHE_EPOCH }}
 
       - name: ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}
-          restore-keys: ccache-${{ matrix.os }}-${{ matrix.arch }}-
+          key: ccache-macos-${{ github.run_id }}
+          restore-keys: ccache-macos-
 
-      - name: Install toolchain + deps
-        run: brew install ccache libtool automake pkg-config wxwidgets dylibbundler
+      - name: Install toolchain
+        run: brew install ccache libtool automake pkg-config dylibbundler
 
-      - name: Build ZenLib + patched MediaInfoLib
+      - name: Build static universal wxWidgets
+        if: ${{ steps.wxcache.outputs.cache-hit != 'true' }}
+        run: ./scripts/build-wx-macos.sh
+
+      - name: Build ZenLib + patched MediaInfoLib (universal)
         if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
-        env: { CC: "ccache clang", CXX: "ccache clang++" }
+        env: { CC: "ccache clang", CXX: "ccache clang++", ARCHS: "${{ env.MACOS_ARCHS }}" }
         run: ./scripts/build-deps.sh
 
-      # With the deps built --disable-shared, libtool links the real binary directly at the target
-      # name (no .libs/ wrapper), depending only on system libs. Verify it is self-contained.
-      - name: Build CLI
+      - name: Build CLI (universal)
         env: { CC: "ccache clang", CXX: "ccache clang++" }
         run: |
           set -euxo pipefail
+          archflags=""; for a in $MACOS_ARCHS; do archflags="$archflags -arch $a"; done
           cd MediaInfo/Project/GNU/CLI
           autoreconf -if
-          ./configure --enable-staticlibs
+          ./configure --enable-staticlibs CFLAGS="$archflags" CXXFLAGS="$archflags" LDFLAGS="$archflags"
           make -j"$(sysctl -n hw.ncpu)"
           test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
-          # With static-only deps libtool links a real Mach-O here (not a .libs wrapper script). A
-          # wrapper means the deps cache still had shared libs: fail so we do not ship a wrapper.
           file mediainfo | grep -q 'Mach-O' || { echo "::error::CLI is a libtool wrapper, not a binary (stale shared deps cache?)"; exit 1; }
+          lipo -info mediainfo
           if otool -L mediainfo | tail -n +2 | grep -viqE '/usr/lib|/System'; then
             echo "::error::CLI has a non-system dylib dep"; otool -L mediainfo; exit 1; fi
           ./mediainfo --version
 
-      - name: Build GUI (wxWidgets)
+      - name: Build GUI (static universal wxWidgets)
         env: { CC: "ccache clang", CXX: "ccache clang++" }
         run: |
           set -euxo pipefail
+          archflags=""; for a in $MACOS_ARCHS; do archflags="$archflags -arch $a"; done
+          export PATH="$WX_PREFIX/bin:$PATH"
           cd MediaInfo/Project/GNU/GUI
           autoreconf -if
-          ./configure --enable-staticlibs
+          ./configure --enable-staticlibs --with-wx-static \
+            --with-wx-config="$WX_PREFIX/bin/wx-config" \
+            CFLAGS="$archflags" CXXFLAGS="$archflags" LDFLAGS="$archflags"
           make -j"$(sysctl -n hw.ncpu)"
           test -x mediainfo-gui || { echo "::error::mediainfo-gui not produced"; exit 1; }
+          lipo -info mediainfo-gui
 
       - name: Package MediaInfo.app + CLI tarball
         run: |
@@ -132,19 +146,18 @@ jobs:
             "MediaInfo/Project/GNU/GUI/mediainfo-gui" \
             "$GITHUB_WORKSPACE/MediaInfo" "$MEDIAINFO_VERSION" \
             "$GITHUB_WORKSPACE/out/MediaInfo.app"
-          # ad-hoc sign the CLI so it runs without a Gatekeeper prompt; stage under a clean name
           install -m755 "MediaInfo/Project/GNU/CLI/mediainfo" "$GITHUB_WORKSPACE/out/mediainfo"
           codesign -f -s - "$GITHUB_WORKSPACE/out/mediainfo"
-          tar cJf "$GITHUB_WORKSPACE/out/mediainfo-cli-macos-${{ matrix.arch }}.tar.xz" -C "$GITHUB_WORKSPACE/out" mediainfo
-          tar cJf "$GITHUB_WORKSPACE/out/MediaInfo-gui-macos-${{ matrix.arch }}.tar.xz" -C "$GITHUB_WORKSPACE/out" MediaInfo.app
+          tar cJf "$GITHUB_WORKSPACE/out/mediainfo-cli-macos-universal.tar.xz" -C "$GITHUB_WORKSPACE/out" mediainfo
+          tar cJf "$GITHUB_WORKSPACE/out/MediaInfo-gui-macos-universal.tar.xz" -C "$GITHUB_WORKSPACE/out" MediaInfo.app
           shasum -a 256 "$GITHUB_WORKSPACE"/out/*.tar.xz
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mediainfo-macos-${{ matrix.arch }}
+          name: mediainfo-macos-universal
           path: |
-            out/mediainfo-cli-macos-${{ matrix.arch }}.tar.xz
-            out/MediaInfo-gui-macos-${{ matrix.arch }}.tar.xz
+            out/mediainfo-cli-macos-universal.tar.xz
+            out/MediaInfo-gui-macos-universal.tar.xz
           if-no-files-found: error
 
   # ---------------------------------------------------------------- Linux (x86_64) ---------------
@@ -219,25 +232,66 @@ jobs:
           path: out/mediainfo-cli-linux-x86_64.tar.xz
           if-no-files-found: error
 
-  # ---------------------------------------------------------------- Windows (scaffold) ----------
-  # Best-effort: MediaInfo ships an MSVC solution (Project/MSVC2026/MediaInfo-NoGUI.slnf) the
-  # official CI drives with msbuild. Wiring the patched MediaInfoLib into that solution build is
-  # left as a scaffold to iterate on in CI; it does not gate the release.
+  # ---------------------------------------------------------------- Windows (x64 CLI) ------------
+  # Official CMake path: FetchContent pulls MediaArea/ZenLib + MediaArea/zlib automatically; our
+  # patched MediaInfoLib sits at the sibling path so add_subdirectory compiles our sources. Produces
+  # a static, self-contained mediainfo.exe.
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Scaffold notice
+        with: { path: build-repo }
+      - name: Checkout MediaInfo
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
+      - name: Checkout MediaInfoLib
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
+
+      - name: Apply MMT/TLV patches to MediaInfoLib
         shell: bash
         run: |
-          echo "::warning::Windows build is a scaffold. Next step: check out the three repos, apply"
-          echo "::warning::patches/mediainfolib to MediaInfoLib, and msbuild Project/MSVC2026/MediaInfo-NoGUI.slnf."
+          set -euxo pipefail
+          cd MediaInfoLib
+          for p in "$GITHUB_WORKSPACE"/build-repo/patches/mediainfolib/*.patch; do
+            echo "applying $(basename "$p")"; git apply --whitespace=nowarn "$p"
+          done
+
+      - name: Setup MSVC environment
+        uses: ./MediaInfo/.github/actions/setup-msvc
+
+      - name: Configure + build CLI (CMake, static)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -G Ninja -D CMAKE_PREFIX_PATH=./cmake-prefix/ -D CMAKE_INSTALL_PREFIX=./cmake-prefix/ \
+            -D CMAKE_BUILD_TYPE=Release -D BUILD_ZENLIB=ON -D BUILD_ZLIB=ON \
+            -D ZLIB_BUILD_SHARED=OFF -D ZLIB_BUILD_TESTING=OFF \
+            -B build ./MediaInfo/Project/CMake/CLI/
+          cmake --build build
+          cmake --install build
+          test -f cmake-prefix/bin/mediainfo.exe || { echo "::error::mediainfo.exe not produced"; exit 1; }
+          ./cmake-prefix/bin/mediainfo.exe --version
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          cp cmake-prefix/bin/mediainfo.exe out/
+          7z a -tzip out/mediainfo-cli-windows-x64.zip ./out/mediainfo.exe >/dev/null
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mediainfo-windows-x64
+          path: out/mediainfo-cli-windows-x64.zip
+          if-no-files-found: error
 
   # ---------------------------------------------------------------- Release (gated) --------------
-  # Runs only when every build job above succeeded (needs: + a guard). Publishes the collected
-  # artifacts to a GitHub Release tagged by run number.
+  # Runs only when every build job succeeded. Publishes the collected artifacts to a GitHub Release.
   release:
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     if: ${{ success() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
@@ -249,7 +303,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release
-          find artifacts -type f -name '*.tar.xz' -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.tar.xz' -o -name '*.zip' \) -exec cp {} release/ \;
           ls -l release
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -257,8 +311,11 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: MediaInfo (MMT/TLV) build ${{ github.run_number }}
           body: |
-            MediaInfo ${{ env.MEDIAINFO_VERSION }} (CLI + macOS wx GUI) built from source with the
-            File_MmtTlv MMT/TLV patches (patches/mediainfolib/) applied to MediaInfoLib.
+            MediaInfo ${{ env.MEDIAINFO_VERSION }} built from source with the File_MmtTlv MMT/TLV
+            patches (patches/mediainfolib/) applied to MediaInfoLib.
+
+            Artifacts: universal2 macOS CLI + MediaInfo.app (arm64 + x86_64), Linux x86_64 CLI,
+            Windows x64 CLI.
 
             Pinned: ZenLib ${{ env.ZENLIB_REF }}, MediaInfoLib ${{ env.MEDIAINFOLIB_REF }},
             MediaInfo ${{ env.MEDIAINFO_REF }}.

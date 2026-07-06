@@ -30,24 +30,26 @@ sed -i '' -e "s/VERSION/${VERSION}/g" "$APP/Contents/Info.plist"
 printf '%s' 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$MAC/MediaInfo.icns" "$APP/Contents/Resources/MediaInfo.icns"
 
-# The wx GUI links Homebrew's wxWidgets dylibs (WXUSINGDLL), which are absent on another machine.
-# Copy them into Contents/libs/ and rewrite the load paths so the app is self-contained, the way a
-# static wx build (Make_MI_dmg's --with-wx-static) would have been. dylibbundler handles the
-# recursive copy + install_name_tool rewrite to @executable_path/../libs.
-dylibbundler --overwrite-dir --bundle-deps --create-dir \
-  --fix-file "$APP/Contents/MacOS/MediaInfo" \
-  --dest-dir "$APP/Contents/libs" \
-  --install-path "@executable_path/../libs/"
+# With wx built static (build-wx-macos.sh) the binary should carry no non-system dylib. If any
+# non-system dylib slipped in (e.g. a Homebrew wx), bundle it into Contents/libs/ and rewrite the
+# load path to @executable_path/../libs, so the app stays self-contained either way.
+if otool -L "$APP/Contents/MacOS/MediaInfo" | tail -n +2 | grep -viqE '/usr/lib|/System|@executable_path'; then
+  dylibbundler --overwrite-dir --bundle-deps --create-dir \
+    --fix-file "$APP/Contents/MacOS/MediaInfo" \
+    --dest-dir "$APP/Contents/libs" \
+    --install-path "@executable_path/../libs/"
+fi
 
-# Fail if any non-system dylib dep remains unresolved to a bundled path.
+# Fail if any non-system dylib dep still remains unresolved.
 if otool -L "$APP/Contents/MacOS/MediaInfo" | tail -n +2 | grep -viqE '/usr/lib|/System|@executable_path'; then
   echo "::error::MediaInfo.app still has an unbundled dylib dep"; otool -L "$APP/Contents/MacOS/MediaInfo"; exit 1
 fi
 
-# Ad-hoc sign (no Developer ID). Fine for personal use, not notarized. Sign the bundled libs first.
+# Ad-hoc sign (no Developer ID). Fine for personal use, not notarized. Sign any bundled libs first.
 find "$APP/Contents/libs" -name '*.dylib' -exec codesign -f -s - {} \; 2>/dev/null || true
 codesign -f -s - "$APP/Contents/MacOS/MediaInfo"
 codesign -f -s - --deep "$APP"
 codesign --verify --verbose "$APP"
+echo "mediainfo-builds: app binary arch: $(lipo -info "$APP/Contents/MacOS/MediaInfo" 2>/dev/null || echo unknown)"
 
-echo "mediainfo-build: built $APP (version $VERSION, ad-hoc signed)"
+echo "mediainfo-builds: built $APP (version $VERSION, ad-hoc signed)"
