@@ -1,0 +1,265 @@
+From 82b052e620a760790e3b9c2d112ec05fea8dbe1b Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Tue, 7 Jul 2026 06:19:15 +0900
+Subject: [PATCH] File_MmtTlv: resolve the A/V config across the
+ program-boundary window
+
+The EIT p/f, the MH-video-component transfer, the ES and the clock all switch
+at different instants around a program boundary, and a program's opening
+segment runs about a minute before the real config appears. A histogram (or
+any first-value read) near the boundary reports the neighbour program's
+grade: an SDR program picked up stray HLG descriptors, and HDR programs
+opened during the opening segment read as SDR.
+
+Keep the newest transfer seen inside a boundary window (75 s from the
+present event's start) and let the p/f itself re-commit within that window,
+so a flip to the next program re-anchors it; the tail probe's MPT belongs to
+the next program and no longer votes. Boundary thresholds move to 60 s (EPG
+times are minute-granular) and the tail-of-previous-program hop sizes itself
+from the observed byte rate, so a whole minute is crossable. With no EIT the
+scan gives up after the same window instead of reading to EOF; files shorter
+than the window keep the newest values seen.
+
+Verified over 287 recordings: the one false HLG is gone, scrambled HDR still
+reads HLG from signaling, and rips that open inside a short filler program
+now commit the following main program.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 107 +++++++++++++++-------
+ Source/MediaInfo/Multiple/File_MmtTlv.h   |   3 +-
+ 2 files changed, 77 insertions(+), 33 deletions(-)
+
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+index cb3c898..3311122 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+@@ -122,17 +122,33 @@ namespace
+     const int64u BOUNDARY_HOP_BYTES             = 8 * 1024 * 1024;
+     const int    BOUNDARY_MAX_HOPS              = 8;
+     // Present event with under this long left at "now" is the previous program's
+-    // tail, not the stream's main program.
+-    const int64s BOUNDARY_GUARD_SECONDS         = 30;
++    // tail, not the stream's main program. EPG times are minute-granular.
++    const int64s BOUNDARY_GUARD_SECONDS         = 60;
+ 
+-    // A present event's A/V config settles within this long of it going on air.
+-    const int64s SETTLE_SECONDS                 = 3;
++    // A program's opening (studio) segment runs about a minute before the real A/V config
++    // (transfer, channels) appears; keep scanning this long past the start, preferring the
++    // newest value seen. Also the give-up horizon when the stream carries no EIT.
++    const int64s BOUNDARY_WINDOW_SECONDS        = 75;
++
++    // First clock this far before the present-event start = not this event's boundary.
++    // EPG times are minute-granular.
++    const int64s BOUNDARY_MISALIGN_SECONDS      = 60;
+ 
+-    // First clock within this of the present-event start = at a boundary; beyond = mid-program.
+-    const int64s BOUNDARY_MISALIGN_SECONDS      = 30;
+ 
+     const int64u TAIL_PROBE_BYTES               = 4 * 1024 * 1024;
+ 
++    // The boundary window has passed for this committed start: the values (and the p/f
++    // itself) are stable. Unknown timing is the caller's decision.
++    inline bool boundary_window_passed(int64s eit_start, int64s now_first, int64s now_utc)
++    {
++        if (eit_start < 0 || now_first < 0 || now_utc < 0)
++            return false;
++        int64s since_start = now_first - eit_start;
++        if (since_start < -BOUNDARY_MISALIGN_SECONDS || since_start > BOUNDARY_WINDOW_SECONDS)
++            return true;
++        return now_utc - eit_start >= BOUNDARY_WINDOW_SECONDS;
++    }
++
+     // MH-SDT recurs less often than MPT/EIT, so scan this far past core
+     // completion to catch it.
+     const int64u SDT_GRACE_PACKETS              = 20000;
+@@ -264,11 +280,12 @@ File_MmtTlv::File_MmtTlv()
+     Mpt_AssetCount           = -1;
+     Mpt_Version              = -1;
+     Eit_Start_Utc            = -1;
+-    for (int i = 0; i < 8; ++i) TransferSeen[i] = 0;
++    Transfer_Last            = 0xFF;
+     Sdt_Found                = false;
+     Ecm_Seen                 = false;
+     Packets_Since_Accept     = 0;
+     Core_Done_At             = (int64u)-1;
++    Media_Done_Utc           = -1;
+     Media_Probe_Done         = false;
+     Media_Bytes              = 0;
+     Now_Utc                  = -1;
+@@ -506,14 +523,13 @@ void File_MmtTlv::Streams_Finish()
+         //From 0x8010: transfer overrides the HEVC VUI; geometry and colour fill the ES's gaps.
+         if (M.StreamKind == Stream_Video)
+         {
+-            int dom = 1;
+-            for (int t = 2; t < 8; ++t) if (TransferSeen[t] > TransferSeen[dom]) dom = t;
+-            if (TransferSeen[dom])
++            if (Transfer_Last >= 1 && Transfer_Last < 8)
+             {
+-                //Descriptor -> VUI code (STD-B60 Table 7-51).
+-                int8u vui = dom == 5 ? 18 : dom == 4 ? 16 : dom == 3 ? 14 : dom == 2 ? 11 : 1;
++                //Descriptor -> VUI code (STD-B60 Table 7-51). The newest descriptor wins over
++                //the ES: a head-bounded probe may only have decoded the opening segment's SPS.
++                int8u vui = Transfer_Last == 5 ? 18 : Transfer_Last == 4 ? 16 : Transfer_Last == 3 ? 14 : Transfer_Last == 2 ? 11 : 1;
+                 Fill(Stream_Video, M.StreamPos, Video_transfer_characteristics, Mpegv_transfer_characteristics(vui), Unlimited, true, true);
+-                if (dom == 3 || dom == 4 || dom == 5)
++                if (Transfer_Last == 3 || Transfer_Last == 4 || Transfer_Last == 5)
+                 {
+                     if (Retrieve_Const(Stream_Video, M.StreamPos, Video_colour_primaries).empty())
+                         Fill(Stream_Video, M.StreamPos, Video_colour_primaries, Mpegv_colour_primaries(9));
+@@ -720,16 +736,12 @@ void File_MmtTlv::Data_Parse()
+         return;
+     }
+ 
+-    // Settled SETTLE_SECONDS past the boundary (the later of the first clock and present-event
+-    // start); a file opened mid-program, or with no EPG/clock, is already settled.
++    // Settled once the boundary window has passed (from the later of the first clock and the
++    // present-event start); a file opened mid-program, or with no EPG/clock, is already settled.
+     auto probe_settled = [&]() -> bool {
+         if (Eit_Start_Utc < 0 || Now_First < 0 || Now_Utc < 0)
+             return true;
+-        int64s dist  = Now_First > Eit_Start_Utc ? Now_First - Eit_Start_Utc : Eit_Start_Utc - Now_First;
+-        if (dist > BOUNDARY_MISALIGN_SECONDS)
+-            return true;
+-        int64s start = Now_First > Eit_Start_Utc ? Now_First : Eit_Start_Utc;
+-        return Now_Utc - start >= SETTLE_SECONDS;
++        return boundary_window_passed(Eit_Start_Utc, Now_First, Now_Utc);
+     };
+     bool Settled = probe_settled();
+     switch ((int8u)Element_Code)
+@@ -766,6 +778,10 @@ void File_MmtTlv::Data_Parse()
+     if (Mpt_Found && MediaParsers.empty())
+         Media_Probe_Done = true;
+ 
++    //Note when the media probe finished with a clock in hand, to time-box the EIT wait below.
++    if (Mpt_Found && Media_Probe_Done && Now_Utc >= 0 && Media_Done_Utc < 0)
++        Media_Done_Utc = Now_Utc;
++
+     //Grace past core completion for the less-frequent MH-SDT.
+     bool CoreComplete = (Mpt_Found && Eit_Present_Found && Media_Probe_Done);
+     if (CoreComplete && Core_Done_At == (int64u)-1)
+@@ -777,12 +793,21 @@ void File_MmtTlv::Data_Parse()
+                      && (Sdt_Found
+                       || (Core_Done_At != (int64u)-1
+                        && Packets_Since_Accept - Core_Done_At >= SDT_GRACE_PACKETS));
+-    if (ScanComplete)
++
++    // No EPG: media probed but no present event within the boundary window of it. The stream
++    // has no EIT (for example a raw service capture); stop the forward scan now instead of
++    // reading to the give-up or EOF (the whole file).
++    bool NoEpgDone = !ScanComplete && Mpt_Found && Media_Probe_Done && !Eit_Present_Found
++                  && Media_Done_Utc >= 0 && Now_Utc >= 0
++                  && Now_Utc - Media_Done_Utc >= BOUNDARY_WINDOW_SECONDS;
++
++    if (ScanComplete || NoEpgDone)
+     {
+-        if (Now_First >= 0
+-         && File_Size != (int64u)-1
+-         && File_Size > TAIL_PROBE_BYTES
+-         && File_Offset + Buffer_Offset < File_Size - TAIL_PROBE_BYTES)
++        // NoEpgDone stopped short of the end, so its tail is always unread; a normal completion
++        // only needs the tail when the forward scan has not reached it yet.
++        bool TailUnread = Now_First >= 0 && File_Size != (int64u)-1 && File_Size > TAIL_PROBE_BYTES
++                       && (NoEpgDone || File_Offset + Buffer_Offset < File_Size - TAIL_PROBE_BYTES);
++        if (TailUnread)
+         {
+             Phase = Phase_Tail;
+             Pts_Last_At_Tail = Pts_Last_Us; //require a fresher PTS from the tail
+@@ -1333,7 +1358,8 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+                     // 01 = superimpose, 00 = subtitle.
+                     if (dlen >= 8 && RB16(db) == 0x0020)
+                         superimpose = ((db[7] >> 6) & 0x03) == 0x01;
+-                }                else if (dtag == 0x8014) // MH_AUDIO_COMPONENT_DESCRIPTOR
++                }
++                else if (dtag == 0x8014) // MH_AUDIO_COMPONENT_DESCRIPTOR
+                 {
+                     // component_type(db[1]) = dialog<<7 | handicapped(2)<<5 |
+                     // audio_mode(5); flags(db[6]) has main_component/ES_multi;
+@@ -1355,9 +1381,12 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+                 }
+                 else if (dtag == 0x8010) // MH_VIDEO_COMPONENT_DESCRIPTOR
+                 {
+-                    //Transfer (b4 hi nibble); histogram so stray MPTs can't flip SDR to HDR.
+-                    if (dlen >= 5 && (db[4] >> 4) < 8)
+-                        TransferSeen[db[4] >> 4]++;
++                    //Transfer (b4 hi nibble). Keep the newest of the head scan: the opening
++                    //segment's grade gives way to the program's real one inside the boundary
++                    //window, so the last value seen is the program's. The tail probe's MPT is
++                    //the NEXT program's, so it must not vote.
++                    if (Phase != Phase_Tail && dlen >= 5 && (db[4] >> 4) >= 1 && (db[4] >> 4) < 8)
++                        Transfer_Last = db[4] >> 4;
+                     //b0 resolution|aspect, b1 scan|frame_rate (STD-B60 Table 7-47).
+                     if (dlen >= 2)
+                     {
+@@ -1411,6 +1440,7 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+             Mpt_Version      = Data[1];
+             Media_Probe_Done = false;
+             Core_Done_At     = (int64u)-1;
++            Media_Done_Utc   = -1;
+         }
+         Mpt_AssetCount = Media;
+         Assets    = Found;
+@@ -1543,7 +1573,10 @@ void File_MmtTlv::Extract_MpuTimestamps(const int8u* Data, size_t Size)
+ //---------------------------------------------------------------------------
+ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+ {
+-    if (Eit_Present_Found)
++    // The p/f is itself a boundary-window value: keep re-reading it until the window has
++    // passed, so a flip to the next program re-commits and re-anchors the window. That also
++    // covers the first EIT preceding the first clock (hop check and anchor were skipped).
++    if (Eit_Present_Found && boundary_window_passed(Eit_Start_Utc, Now_First, Now_Utc))
+         return;
+     // table_id(8) section_syntax+len(16); section_length = low 12 bits.
+     if (Size < 3) return;
+@@ -1618,14 +1651,24 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+                     Assets.clear();
+                     Mpt_Found        = false;
+                     Mpt_AssetCount   = -1;
+-                    for (int i = 0; i < 8; ++i) TransferSeen[i] = 0;
++                    Transfer_Last    = 0xFF;
+                     Media_Probe_Done = false;
+                     Media_Bytes      = 0;
+                     Core_Done_At     = (int64u)-1; // core re-derives at new pos
++                    Media_Done_Utc   = -1;
+ 
+                     ++Eit_Boundary_Hops;
+                     int64u here = File_Offset + Buffer_Offset;
+-                    int64u target = here + BOUNDARY_HOP_BYTES;
++                    // Size the hop to land just past the event's end, from the byte rate
++                    // observed so far; a fixed nudge cannot cross a minute-long tail.
++                    int64u hop = BOUNDARY_HOP_BYTES;
++                    if (Now_Utc > Now_First && end_s + 2 > Now_Utc)
++                    {
++                        int64u rate = here / (int64u)(Now_Utc - Now_First);
++                        if (rate > 0 && (int64u)(end_s + 2 - Now_Utc) > BOUNDARY_HOP_BYTES / rate)
++                            hop = rate * (int64u)(end_s + 2 - Now_Utc);
++                    }
++                    int64u target = here + hop;
+                     if (File_Size != (int64u)-1 && target >= File_Size)
+                         target = here + BOUNDARY_HOP_BYTES / 4; // small final nudge
+                     GoTo(target, "MmtTlv");
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.h b/Source/MediaInfo/Multiple/File_MmtTlv.h
+index 6eda27a..3ef479f 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.h
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.h
+@@ -170,7 +170,7 @@ private :
+     bool     Mpt_Found;
+     int      Mpt_AssetCount;     //media assets in the committed MPT version (fullest within it)
+     int      Mpt_Version;        //committed MPT version; a change replaces the track set
+-    int      TransferSeen[8];    //video transfer histogram (STD-B60 7-51); the majority wins
++    int8u    Transfer_Last;      //newest 0x8010 transfer code (STD-B60 7-51); 0xFF = none seen
+ 
+     //Per-channel, so it survives an EIT boundary re-scan (unlike the MPT).
+     bool     Sdt_Found;
+@@ -203,6 +203,7 @@ private :
+     //When the core (MPT + present EIT + media probe) completed; a bounded grace
+     //after it catches the less-frequent MH-SDT. -1 = not yet.
+     int64u   Core_Done_At;
++    int64s   Media_Done_Utc;     //clock when MPT+media first done, to time-box the EIT wait
+ };
+ 
+ } //NameSpace
+-- 
+2.50.1 (Apple Git-155)
+
