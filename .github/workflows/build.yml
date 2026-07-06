@@ -36,7 +36,7 @@ env:
   MEDIAINFOLIB_REF: "dd11d7971107e1b554e41ed446387d22cb3198e9"
   MEDIAINFO_REF: "d327f8fe76208f0b70bc08e4b55dca508991500d"
   MEDIAINFO_VERSION: "26.05"
-  CACHE_EPOCH: "1"
+  CACHE_EPOCH: "2"
 
 jobs:
   # ---------------------------------------------------------------- macOS (arm64 + x86_64) -------
@@ -107,6 +107,9 @@ jobs:
           ./configure --enable-staticlibs
           make -j"$(sysctl -n hw.ncpu)"
           test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
+          # With static-only deps libtool links a real Mach-O here (not a .libs wrapper script). A
+          # wrapper means the deps cache still had shared libs: fail so we do not ship a wrapper.
+          file mediainfo | grep -q 'Mach-O' || { echo "::error::CLI is a libtool wrapper, not a binary (stale shared deps cache?)"; exit 1; }
           if otool -L mediainfo | tail -n +2 | grep -viqE '/usr/lib|/System'; then
             echo "::error::CLI has a non-system dylib dep"; otool -L mediainfo; exit 1; fi
           ./mediainfo --version

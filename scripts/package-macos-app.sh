@@ -14,6 +14,9 @@ APP="${4:?output MediaInfo.app path}"
 MAC="$MI_SRC/Project/Mac"
 test -x "$GUI_BIN"       || { echo "::error::mediainfo-gui not found or not executable: $GUI_BIN"; exit 1; }
 test -f "$MAC/Info.plist" || { echo "::error::$MAC/Info.plist missing"; exit 1; }
+# Must be the real Mach-O, not a libtool wrapper script (which happens if the deps cache still had
+# shared libs); bundling a wrapper would ship a broken app.
+file "$GUI_BIN" | grep -q 'Mach-O' || { echo "::error::mediainfo-gui is a libtool wrapper, not a binary: $GUI_BIN"; exit 1; }
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
