@@ -1,0 +1,266 @@
+From fed717f3c11c99bdee43655bca8370784650e406 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Sun, 5 Jul 2026 17:16:48 +0900
+Subject: [PATCH 07/14] File_MmtTlv: settle the A/V component profile past a
+ program switch
+
+The MH-EIT and A/V config settle a beat after a program airs. Wait a
+settle interval past a boundary, then take the fullest MPT audio and the
+majority video-component transfer (overriding a disagreeing HEVC VUI).
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 105 +++++++++++++++++-----
+ Source/MediaInfo/Multiple/File_MmtTlv.h   |   8 +-
+ 2 files changed, 88 insertions(+), 25 deletions(-)
+
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+index 65c28f1..a5023d0 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+@@ -115,6 +115,12 @@ namespace
+     // tail, not the stream's main program.
+     const int64s BOUNDARY_GUARD_SECONDS         = 30;
+ 
++    // A present event's A/V config settles within this long of it going on air.
++    const int64s SETTLE_SECONDS                 = 3;
++
++    // First clock within this of the present-event start = at a boundary; beyond = mid-program.
++    const int64s BOUNDARY_MISALIGN_SECONDS      = 30;
++
+     const int64u TAIL_PROBE_BYTES               = 4 * 1024 * 1024;
+ 
+     // MH-SDT recurs less often than MPT/EIT, so scan this far past core
+@@ -219,6 +225,9 @@ File_MmtTlv::File_MmtTlv()
+     Eit_ServiceId            = 0;
+     Eit_ServiceId_Found      = false;
+     Mpt_Found                = false;
++    Mpt_AssetCount           = -1;
++    Eit_Start_Utc            = -1;
++    for (int i = 0; i < 8; ++i) TransferSeen[i] = 0;
+     Sdt_Found                = false;
+     Ecm_Seen                 = false;
+     Packets_Since_Accept     = 0;
+@@ -312,24 +321,32 @@ void File_MmtTlv::Streams_Fill()
+                     Fill(Stream_Audio, StreamPos_Last, Audio_ServiceKind, "VI");
+                     Fill(Stream_Audio, StreamPos_Last, Audio_ServiceKind_String, "Visually Impaired");
+                 }
+-                //Encrypted: no ES detail, so fall back to the clear descriptor.
++                //Seed channels from the audio-component descriptor for every asset; the decoded ES
++                //overrides it in Streams_Finish only upward.
++                {
++                const char* Layout = NULL;
++                int DescCh = AudioModeChannels(A.AudioMode, &Layout);
++                if (DescCh)
++                    Fill(Stream_Audio, StreamPos_Last, Audio_Channel_s_, DescCh);
++                if (Layout)
++                    Fill(Stream_Audio, StreamPos_Last, Audio_ChannelLayout, Layout);
++                //Encrypted: no ES detail, so the descriptor is all we have.
+                 if (PidEncrypted(A.PacketId))
+                 {
+                     Fill(Stream_Audio, StreamPos_Last, "Encryption", "Encrypted");
+                     int32u SamplingRate = AudioSamplingRate(A.SamplingCode);
+                     if (SamplingRate)
+                         Fill(Stream_Audio, StreamPos_Last, Audio_SamplingRate, SamplingRate);
+-                    const char* Layout = NULL;
+-                    int Channels = AudioModeChannels(A.AudioMode, &Layout);
+-                    if (Channels)
+-                        Fill(Stream_Audio, StreamPos_Last, Audio_Channel_s_, Channels);
+-                    if (Layout)
+-                        Fill(Stream_Audio, StreamPos_Last, Audio_ChannelLayout, Layout);
+                 }
+                 {
+                     std::map<int16u, media_parser>::iterator It = MediaParsers.find(A.PacketId);
+                     if (It != MediaParsers.end())
+-                        It->second.StreamPos = StreamPos_Last;
++                    {
++                        It->second.StreamPos  = StreamPos_Last;
++                        It->second.DescCh     = DescCh;
++                        It->second.DescLayout = Layout;
++                    }
++                }
+                 }
+                 break;
+             case ASSET_STPP:
+@@ -396,6 +413,27 @@ void File_MmtTlv::Streams_Finish()
+         Open_Buffer_Finalize(M.Parser);
+         //Non-erasing: keep the container-level Format/CodecID/ID, add codec detail.
+         Merge(*M.Parser, M.StreamKind, 0, M.StreamPos, false);
++        //Keep the descriptor channels when the decoded ES read fewer (a boundary transient).
++        if (M.StreamKind == Stream_Audio && M.DescCh)
++        {
++            int64u EsCh = Retrieve_Const(Stream_Audio, M.StreamPos, Audio_Channel_s_).To_int64u();
++            if (EsCh < (int64u)M.DescCh)
++            {
++                Fill(Stream_Audio, M.StreamPos, Audio_Channel_s_, (int64u)M.DescCh, 10, true);
++                if (M.DescLayout)
++                    Fill(Stream_Audio, M.StreamPos, Audio_ChannelLayout, Ztring().From_UTF8(M.DescLayout), true);
++            }
++        }
++        //Trust the descriptor's majority transfer over the HEVC VUI, which can disagree (an SDR
++        //program carried on an HLG channel signals HLG in the VUI but BT.2020 in the descriptor).
++        if (M.StreamKind == Stream_Video)
++        {
++            int dom = 1;
++            for (int t = 2; t < 8; ++t) if (TransferSeen[t] > TransferSeen[dom]) dom = t;
++            const char* tc = TransferSeen[dom] ? (dom == 5 ? "HLG" : dom == 4 ? "PQ" : dom == 3 ? "BT.2020 (10-bit)" : dom == 1 ? "BT.709" : NULL) : NULL;
++            if (tc)
++                Fill(Stream_Video, M.StreamPos, Video_transfer_characteristics, tc, Unlimited, true, true);
++        }
+         delete M.Parser;
+         M.Parser = NULL;
+     }
+@@ -583,10 +621,22 @@ void File_MmtTlv::Data_Parse()
+         return;
+     }
+ 
++    // Settled SETTLE_SECONDS past the boundary (the later of the first clock and present-event
++    // start); a file opened mid-program, or with no EPG/clock, is already settled.
++    auto probe_settled = [&]() -> bool {
++        if (Eit_Start_Utc < 0 || Now_First < 0 || Now_Utc < 0)
++            return true;
++        int64s dist  = Now_First > Eit_Start_Utc ? Now_First - Eit_Start_Utc : Eit_Start_Utc - Now_First;
++        if (dist > BOUNDARY_MISALIGN_SECONDS)
++            return true;
++        int64s start = Now_First > Eit_Start_Utc ? Now_First : Eit_Start_Utc;
++        return Now_Utc - start >= SETTLE_SECONDS;
++    };
++    bool Settled = probe_settled();
+     switch ((int8u)Element_Code)
+     {
+         case TLV_HEADER_COMPRESSED_IP_PACKET:
+-            if (!(Mpt_Found && Eit_Present_Found && Media_Probe_Done && Sdt_Found))
++            if (!(Mpt_Found && Eit_Present_Found && Media_Probe_Done && Sdt_Found && Settled))
+                 Parse_CompressedIp(Payload, Size);
+             break;
+         case TLV_IPV6_PACKET:
+@@ -622,7 +672,9 @@ void File_MmtTlv::Data_Parse()
+     if (CoreComplete && Core_Done_At == (int64u)-1)
+         Core_Done_At = Packets_Since_Accept;
+ 
+-    bool ScanComplete = CoreComplete
++    // Recompute: this packet's EIT/TOT may have set the start or advanced the clock.
++    Settled = probe_settled();
++    bool ScanComplete = CoreComplete && Settled
+                      && (Sdt_Found
+                       || (Core_Done_At != (int64u)-1
+                        && Packets_Since_Accept - Core_Done_At >= SDT_GRACE_PACKETS));
+@@ -1069,8 +1121,7 @@ void File_MmtTlv::Parse_Table(const int8u* Data, size_t Size)
+ //---------------------------------------------------------------------------
+ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+ {
+-    if (Mpt_Found)
+-        return;
++    //No early latch: re-scan every MPT and keep the fullest asset list (below).
+ 
+     // table_id(8) version(8) length(16)
+     if (Size < 4) return;
+@@ -1172,8 +1223,7 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+                     // == 0b01 is superimpose (ARIB STD-B60).
+                     if (dlen >= 8 && RB16(db) == 0x0020)
+                         superimpose = ((db[7] >> 6) & 0x03) == 0x01;
+-                }
+-                else if (dtag == 0x8014) // MH_AUDIO_COMPONENT_DESCRIPTOR
++                }                else if (dtag == 0x8014) // MH_AUDIO_COMPONENT_DESCRIPTOR
+                 {
+                     // component_type(db[1]) = dialog<<7 | handicapped(2)<<5 |
+                     // audio_mode(5); flags(db[6]) has main_component/ES_multi;
+@@ -1193,6 +1243,13 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+                             aud_title.From_UTF8(std::string((const char*)(db + t), (size_t)dlen - t));
+                     }
+                 }
++                else if (dtag == 0x8010) // MH_VIDEO_COMPONENT_DESCRIPTOR
++                {
++                    //b4 hi nibble = transfer characteristics (STD-B60 Table 7-51). Count into a
++                    //histogram so a few stray MPTs cannot flip an SDR program to HDR.
++                    if (dlen >= 5 && (db[4] >> 4) < 8)
++                        TransferSeen[db[4] >> 4]++;
++                }
+                 d += 3 + dlen; dn -= 3 + dlen;
+             }
+         }
+@@ -1211,16 +1268,14 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+         Found.push_back(a);
+     }
+ 
+-    //Require a media asset before committing, so a stray/empty table doesn't latch.
+-    bool HasMedia = false;
++    //Commit the fullest MPT, not the first: the asset list settles after a program switch.
++    int Media = 0;
+     for (size_t i = 0; i < Found.size(); ++i)
+         if (Found[i].Type == ASSET_HEV1 || Found[i].Type == ASSET_MP4A || Found[i].Type == ASSET_STPP)
+-        {
+-            HasMedia = true;
+-            break;
+-        }
+-    if (HasMedia)
++            ++Media;
++    if (Media && Media >= Mpt_AssetCount)
+     {
++        Mpt_AssetCount = Media;
+         Assets    = Found;
+         Mpt_Found = true;
+ 
+@@ -1407,6 +1462,7 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+             if (start_s >= 0)
+             {
+                 start_s -= JST_OFFSET_SECONDS; // -> UTC, to compare with Now_Utc
++                Eit_Start_Utc = start_s;
+                 int dur_h = bcd2((int8u)(duration >> 16));
+                 int dur_m = bcd2((int8u)(duration >> 8));
+                 int dur_s = bcd2((int8u)(duration));
+@@ -1415,9 +1471,8 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+                 if (dur > 0 && end_s <= Now_Utc + BOUNDARY_GUARD_SECONDS
+                  && Eit_Boundary_Hops < BOUNDARY_MAX_HOPS)
+                 {
+-                    // The boundary may reconfigure the A/V (5.1<->stereo,
+-                    // resolution, asset set), so drop the prior program's probe
+-                    // and re-derive after the hop.
++                    // The boundary may reconfigure the A/V, so drop the prior
++                    // program's probe and re-derive after the hop.
+                     for (std::map<int16u, media_parser>::iterator It = MediaParsers.begin();
+                          It != MediaParsers.end(); ++It)
+                         delete It->second.Parser;
+@@ -1425,6 +1480,8 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+                     MfuAssemblers.clear();
+                     Assets.clear();
+                     Mpt_Found        = false;
++                    Mpt_AssetCount   = -1;
++                    for (int i = 0; i < 8; ++i) TransferSeen[i] = 0;
+                     Media_Probe_Done = false;
+                     Media_Bytes      = 0;
+                     Core_Done_At     = (int64u)-1; // core re-derives at new pos
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.h b/Source/MediaInfo/Multiple/File_MmtTlv.h
+index cc9e151..4a4df69 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.h
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.h
+@@ -122,8 +122,11 @@ private :
+         bool           Done;
+         int64u         Fed;         //validated bytes fed (readability signal)
+         int64u         MpuSeen;     //MPU packets routed here (scramble give-up)
++        int            DescCh;      //audio-component channel count
++        const char*    DescLayout;  //layout for DescCh (static; may be NULL)
+         media_parser() : Parser(NULL), StreamKind(Stream_Video), StreamPos(0),
+-                         IsAac(false), Done(false), Fed(0), MpuSeen(0) {}
++                         IsAac(false), Done(false), Fed(0), MpuSeen(0),
++                         DescCh(0), DescLayout(NULL) {}
+     };
+     std::map<int16u, media_parser> MediaParsers;
+     bool     Media_Probe_Done;
+@@ -145,10 +148,13 @@ private :
+     int16u   Eit_EventId;
+     int16u   Eit_StartDate;      //MJD
+     int32u   Eit_StartTime;      //24-bit BCD HHMMSS
++    int64s   Eit_Start_Utc;      //present event start, UTC (settle grace)
+     int32u   Eit_Duration;       //24-bit BCD HHMMSS
+     Ztring   Eit_Language;
+ 
+     bool     Mpt_Found;
++    int      Mpt_AssetCount;     //media assets in the committed MPT; a shorter later one is ignored
++    int      TransferSeen[8];    //video transfer histogram (STD-B60 7-51); the majority wins
+ 
+     //Per-channel, so it survives an EIT boundary re-scan (unlike the MPT).
+     bool     Sdt_Found;
+-- 
+2.50.1 (Apple Git-155)
+

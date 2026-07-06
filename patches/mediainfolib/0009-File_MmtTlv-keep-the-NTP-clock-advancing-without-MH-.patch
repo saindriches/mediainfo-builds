@@ -1,0 +1,70 @@
+From b6be32db75ead3b5841329e8536e92f6c89816eb Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Mon, 6 Jul 2026 01:08:20 +0900
+Subject: [PATCH 09/14] File_MmtTlv: keep the NTP clock advancing without
+ MH-TOT
+
+NTP was read once then frozen, so the settle never elapsed and Duration
+collapsed to the head span. Advance from NTP until an MH-TOT takes over.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 8 +++++---
+ Source/MediaInfo/Multiple/File_MmtTlv.h   | 1 +
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+index f23daae..5e3bc11 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+@@ -264,6 +264,7 @@ File_MmtTlv::File_MmtTlv()
+     Media_Probe_Done         = false;
+     Media_Bytes              = 0;
+     Now_Utc                  = -1;
++    Tot_Seen                 = false;
+     Now_First                = -1;
+     Now_Last                 = -1;
+     Pts_First_Us             = -1;
+@@ -703,8 +704,8 @@ void File_MmtTlv::Data_Parse()
+                 Parse_CompressedIp(Payload, Size);
+             break;
+         case TLV_IPV6_PACKET:
+-            //NTP fallback clock, only until MH-TOT provides one.
+-            if (Now_Utc < 0)
++            //Advance the clock from NTP until MH-TOT takes over; an NTP-only stream must not freeze.
++            if (!Tot_Seen)
+                 Parse_Ntp(Payload, Size);
+             break;
+         default:
+@@ -1636,6 +1637,7 @@ void File_MmtTlv::Parse_MhTot(const int8u* Data, size_t Size)
+     if (utc < 0)
+         return;
+     utc -= JST_OFFSET_SECONDS;
++    Tot_Seen = true;
+     Now_Utc = utc; // authoritative, overrides NTP
+     Note_StreamNow(utc);
+ }
+@@ -1747,7 +1749,7 @@ void File_MmtTlv::Parse_Ntp(const int8u* Data, size_t Size)
+     if (ntp_secs == 0)
+         return;
+     int64s utc = (int64s)ntp_secs - NTP_UNIX_EPOCH_DELTA;
+-    if (Now_Utc < 0)
++    if (!Tot_Seen)
+         Now_Utc = utc; // provisional until MH-TOT
+     Note_StreamNow(utc);
+ }
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.h b/Source/MediaInfo/Multiple/File_MmtTlv.h
+index ff4896d..71b936c 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.h
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.h
+@@ -174,6 +174,7 @@ private :
+ 
+     //Stream wall clock, JST seconds since the Unix epoch. MH-TOT preferred, NTP
+     //transmit timestamp fallback. -1 = not seen.
++    bool     Tot_Seen;   //authoritative MH-TOT clock seen; until then NTP advances it
+     int64s   Now_Utc;            //latest, drives the boundary check
+     int64s   Now_First;
+     int64s   Now_Last;           //incl. tail probe
+-- 
+2.50.1 (Apple Git-155)
+

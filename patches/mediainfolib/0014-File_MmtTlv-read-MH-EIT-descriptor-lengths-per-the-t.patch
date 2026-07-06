@@ -1,0 +1,53 @@
+From 8e1badc1c08329d8dda581baafb2a5ef244a1f4a Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Mon, 6 Jul 2026 03:32:42 +0900
+Subject: [PATCH 14/14] File_MmtTlv: read MH-EIT descriptor lengths per the
+ tag's field size
+
+The event-loop assumed a 16-bit descriptor_length for every descriptor,
+but only 0xF000+ (short/extended event) use 16 bits; 0x80xx (component,
+content, ...) use 8 bits (STD-B60 tag table). An 8-bit descriptor before
+the short-event one misaligned the loop and the program name was lost.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+index 04a7874..cb3c898 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+@@ -1640,12 +1640,16 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+         Eit_Duration  = duration;
+ 
+         const int8u* d = p; size_t dn = desc_loop_len;
+-        while (dn >= 4)
++        while (dn >= 3)
+         {
+             int16u desc_tag = RB16(d);
+-            int16u desc_len = RB16(d + 2); // MH descriptors use a 16-bit length
+-            const int8u* dbody = d + 4;
+-            if (desc_len > dn - 4) break;
++            // Length field is 16-bit for 0xF000-0xFFFF descriptors, 8-bit below that
++            // (STD-B60 descriptor tag table); the MH-EIT loop mixes both.
++            size_t hdr     = desc_tag >= 0xF000 ? 4 : 3;
++            if (dn < hdr) break;
++            size_t desc_len = desc_tag >= 0xF000 ? RB16(d + 2) : d[2];
++            const int8u* dbody = d + hdr;
++            if (desc_len > dn - hdr) break;
+ 
+             if (desc_tag == DESC_MH_SHORT_EVENT && desc_len >= 4)
+             {
+@@ -1669,7 +1673,7 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+                 }
+             }
+ 
+-            d += 4 + desc_len; dn -= 4 + desc_len;
++            d += hdr + desc_len; dn -= hdr + desc_len;
+         }
+ 
+         p += desc_loop_len; n -= desc_loop_len;
+-- 
+2.50.1 (Apple Git-155)
+

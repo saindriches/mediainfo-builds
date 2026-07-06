@@ -1,0 +1,149 @@
+From 430a15aefe53c86f8d7257fc40fb428e3e8df72b Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Mon, 6 Jul 2026 01:11:31 +0900
+Subject: [PATCH 10/14] File_MmtTlv: reuse the shared AAC channel strings for
+ audio
+
+Map audio_mode (STD-B60 Table 7-60) to an MPEG-4 channel_configuration
+and derive channels, layout and positions from the shared Aac_* helpers,
+as the decoded AAC path does; supersedes the earlier local channel map.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 64 +++++++++++++++--------
+ Source/MediaInfo/Multiple/File_MmtTlv.h   |  4 +-
+ 2 files changed, 45 insertions(+), 23 deletions(-)
+
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+index 5e3bc11..87f5193 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
+@@ -49,6 +49,11 @@ namespace MediaInfoLib
+ extern const char* Mpegv_colour_primaries(int8u colour_primaries);
+ extern const char* Mpegv_transfer_characteristics(int8u transfer_characteristics);
+ extern const char* Mpegv_matrix_coefficients(int8u matrix_coefficients);
++// Shared AAC channel strings (File_Aac_Main.cpp), keyed by MPEG-4 channel_configuration.
++extern int8u Aac_Channels_Get(int8u ChannelLayout);
++extern std::string Aac_ChannelConfiguration_GetString(int8u ChannelLayout);
++extern std::string Aac_ChannelConfiguration2_GetString(int8u ChannelLayout);
++extern std::string Aac_ChannelLayout_GetString(int8u ChannelLayout, bool IsMpegh3da, bool IsTip);
+ 
+ //***************************************************************************
+ // Constants
+@@ -203,19 +208,21 @@ namespace
+         }
+     }
+ 
+-    // MH-audio-component audio_mode -> channels + layout (ARIB STD-B10), for the
+-    // unambiguous configurations only; 0 = leave to the ES parser.
+-    inline int AudioModeChannels(int8u mode, const char** Layout)
++    // MH-audio-component audio_mode (ARIB STD-B60 Table 7-60) -> MPEG-4 channel_configuration,
++    // so the shared Aac_* strings apply. 0 = leave to the ES parser.
++    inline int8u AudioModeToAacConfig(int8u mode)
+     {
+-        *Layout = NULL;
+         switch (mode)
+         {
+-            case 0x01: *Layout = "C";                 return 1;  // 1/0     mono
+-            case 0x02:                                return 2;  // 1/0+1/0 dual mono
+-            case 0x03: *Layout = "L R";               return 2;  // 2/0     stereo
+-            case 0x08: *Layout = "C L R Ls Rs LFE";   return 6;  // 3/2+LFE 5.1
+-            case 0x09: *Layout = "C L R Ls Rs Lrs Rrs LFE"; return 8; // 3/2/2+LFE 7.1
+-            case 0x11: return 24; // 22.2ch
++            case 0x01: return 1;  // 1/0 mono
++            case 0x02: return 8;  // 1/0+1/0 dual mono
++            case 0x03: return 2;  // 2/0 stereo
++            case 0x05: return 3;  // 3/0
++            case 0x07: return 4;  // 3/1
++            case 0x08: return 5;  // 3/2 (5.0)
++            case 0x09: return 6;  // 3/2+LFE (5.1)
++            case 0x0C: return 7;  // 5/2.1 (7.1)
++            case 0x11: return 13; // 22.2
+             default:   return 0;
+         }
+     }
+@@ -365,15 +372,23 @@ void File_MmtTlv::Streams_Fill()
+                     Fill(Stream_Audio, StreamPos_Last, Audio_ServiceKind, "VI");
+                     Fill(Stream_Audio, StreamPos_Last, Audio_ServiceKind_String, "Visually Impaired");
+                 }
+-                //Seed channels from the audio-component descriptor for every asset; the decoded ES
+-                //overrides it in Streams_Finish only upward.
++                //Seed channels from the descriptor (shared Aac_* strings); the ES overrides upward.
+                 {
+-                const char* Layout = NULL;
+-                int DescCh = AudioModeChannels(A.AudioMode, &Layout);
++                int8u Cfg  = AudioModeToAacConfig(A.AudioMode);
++                int DescCh = Aac_Channels_Get(Cfg);
+                 if (DescCh)
++                {
+                     Fill(Stream_Audio, StreamPos_Last, Audio_Channel_s_, DescCh);
+-                if (Layout)
+-                    Fill(Stream_Audio, StreamPos_Last, Audio_ChannelLayout, Layout);
++                    Ztring Pos; Pos.From_UTF8(Aac_ChannelConfiguration_GetString(Cfg));
++                    if (!Pos.empty())
++                        Fill(Stream_Audio, StreamPos_Last, Audio_ChannelPositions, Pos);
++                    Ztring Pos2; Pos2.From_UTF8(Aac_ChannelConfiguration2_GetString(Cfg));
++                    if (!Pos2.empty())
++                        Fill(Stream_Audio, StreamPos_Last, Audio_ChannelPositions_String2, Pos2);
++                    Ztring Lay; Lay.From_UTF8(Aac_ChannelLayout_GetString(Cfg, false, false));
++                    if (!Lay.empty())
++                        Fill(Stream_Audio, StreamPos_Last, Audio_ChannelLayout, Lay);
++                }
+                 //Encrypted: no ES detail, so the descriptor is all we have.
+                 if (PidEncrypted(A.PacketId))
+                 {
+@@ -386,9 +401,9 @@ void File_MmtTlv::Streams_Fill()
+                     std::map<int16u, media_parser>::iterator It = MediaParsers.find(A.PacketId);
+                     if (It != MediaParsers.end())
+                     {
+-                        It->second.StreamPos  = StreamPos_Last;
+-                        It->second.DescCh     = DescCh;
+-                        It->second.DescLayout = Layout;
++                        It->second.StreamPos = StreamPos_Last;
++                        It->second.DescCh    = DescCh;
++                        It->second.DescCfg   = Cfg;
+                     }
+                 }
+                 }
+@@ -464,8 +479,15 @@ void File_MmtTlv::Streams_Finish()
+             if (EsCh < (int64u)M.DescCh)
+             {
+                 Fill(Stream_Audio, M.StreamPos, Audio_Channel_s_, (int64u)M.DescCh, 10, true);
+-                if (M.DescLayout)
+-                    Fill(Stream_Audio, M.StreamPos, Audio_ChannelLayout, Ztring().From_UTF8(M.DescLayout), true);
++                Ztring Pos; Pos.From_UTF8(Aac_ChannelConfiguration_GetString(M.DescCfg));
++                if (!Pos.empty())
++                    Fill(Stream_Audio, M.StreamPos, Audio_ChannelPositions, Pos, true);
++                Ztring Pos2; Pos2.From_UTF8(Aac_ChannelConfiguration2_GetString(M.DescCfg));
++                if (!Pos2.empty())
++                    Fill(Stream_Audio, M.StreamPos, Audio_ChannelPositions_String2, Pos2, true);
++                Ztring Lay; Lay.From_UTF8(Aac_ChannelLayout_GetString(M.DescCfg, false, false));
++                if (!Lay.empty())
++                    Fill(Stream_Audio, M.StreamPos, Audio_ChannelLayout, Lay, true);
+             }
+         }
+         //From 0x8010: transfer overrides the HEVC VUI; geometry and colour fill the ES's gaps.
+diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.h b/Source/MediaInfo/Multiple/File_MmtTlv.h
+index 71b936c..e0f90ee 100644
+--- a/Source/MediaInfo/Multiple/File_MmtTlv.h
++++ b/Source/MediaInfo/Multiple/File_MmtTlv.h
+@@ -129,14 +129,14 @@ private :
+         int64u         Fed;         //validated bytes fed (readability signal)
+         int64u         MpuSeen;     //MPU packets routed here (scramble give-up)
+         int            DescCh;      //audio-component channel count
+-        const char*    DescLayout;  //layout for DescCh (static; may be NULL)
++        int8u          DescCfg;     //MPEG-4 channel_configuration for the shared Aac_* strings
+         //Video geometry from 0x8010; fills the ES's gaps at finish.
+         int            DescWidth, DescHeight;
+         float64        DescFrameRate;
+         int8u          DescScan;              //0xFF=none
+         media_parser() : Parser(NULL), StreamKind(Stream_Video), StreamPos(0),
+                          IsAac(false), Done(false), Fed(0), MpuSeen(0),
+-                         DescCh(0), DescLayout(NULL),
++                         DescCh(0), DescCfg(0),
+                          DescWidth(0), DescHeight(0), DescFrameRate(0), DescScan(0xFF) {}
+     };
+     std::map<int16u, media_parser> MediaParsers;
+-- 
+2.50.1 (Apple Git-155)
+

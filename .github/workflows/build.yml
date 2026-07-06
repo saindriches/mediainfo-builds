@@ -1,0 +1,260 @@
+name: build
+
+# Builds MediaInfo (the mediainfo CLI everywhere, plus a MediaInfo.app wxWidgets GUI on macOS) from
+# its three official source repos (ZenLib, MediaInfoLib, MediaInfo) with patches/mediainfolib/*.patch
+# applied to MediaInfoLib. Those patches add the File_MmtTlv MMT/TLV parser, so mediainfo reports
+# assets, codecs, EIT, service, audio, and scramble state from ISDB-S3 4K/8K .mmts files.
+#
+# Caching, so iterating is cheap:
+#   1. The built ZenLib + patched MediaInfoLib prefix (deps-prefix/) is cached, keyed on the patch
+#      set + the pinned refs. It rebuilds only when a patch or a ref changes; a CLI/GUI-only change
+#      restores it in seconds (build-deps.sh is idempotent, so a cache hit is free).
+#   2. ccache accelerates recompiles, keyed per platform with a rolling restore-key.
+#
+# On an all-jobs-success run the release job publishes the artifacts to a GitHub Release.
+
+on:
+  push:
+    branches: [main]
+    paths: ['patches/**', 'scripts/**', '.github/workflows/build.yml', 'manifest.env']
+  workflow_dispatch:
+    inputs:
+      force_rebuild_deps:
+        description: "Ignore the deps prefix cache and rebuild ZenLib + MediaInfoLib"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZENLIB_REF: "v0.4.41"
+  MEDIAINFOLIB_REF: "dd11d7971107e1b554e41ed446387d22cb3198e9"
+  MEDIAINFO_REF: "d327f8fe76208f0b70bc08e4b55dca508991500d"
+  MEDIAINFO_VERSION: "26.05"
+  CACHE_EPOCH: "1"
+
+jobs:
+  # ---------------------------------------------------------------- macOS (arm64 + x86_64) -------
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, arch: arm64 }
+          - { os: macos-13, arch: x86_64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: "800M"
+      HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout ZenLib
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_REF }}", path: ZenLib }
+      - name: Checkout MediaInfoLib
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
+      - name: Checkout MediaInfo
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
+
+      - name: Compute patch hash
+        id: keys
+        run: echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      # Cache the two built source trees in place; the CLI/GUI find them via the sibling paths the
+      # official build expects. build-deps.sh is idempotent, so a hit skips the rebuild.
+      - name: Restore built deps
+        id: depcache
+        if: ${{ github.event.inputs.force_rebuild_deps != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ZenLib
+            MediaInfoLib
+          key: deps-${{ matrix.os }}-${{ matrix.arch }}-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: ccache-${{ matrix.os }}-${{ matrix.arch }}-
+
+      - name: Install toolchain + deps
+        run: brew install ccache libtool automake pkg-config wxwidgets
+
+      - name: Build ZenLib + patched MediaInfoLib
+        if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
+        env: { CC: "ccache clang", CXX: "ccache clang++" }
+        run: ./scripts/build-deps.sh
+
+      - name: Build CLI
+        env: { CC: "ccache clang", CXX: "ccache clang++" }
+        run: |
+          set -euxo pipefail
+          cd MediaInfo/Project/GNU/CLI
+          autoreconf -if
+          ./configure --enable-staticlibs
+          make -j"$(sysctl -n hw.ncpu)"
+          test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
+          ./mediainfo --version
+
+      - name: Build GUI (wxWidgets)
+        env: { CC: "ccache clang", CXX: "ccache clang++" }
+        run: |
+          set -euxo pipefail
+          cd MediaInfo/Project/GNU/GUI
+          autoreconf -if
+          ./configure --enable-staticlibs
+          make -j"$(sysctl -n hw.ncpu)"
+          test -x mediainfo-gui || test -x .libs/mediainfo-gui || { echo "::error::mediainfo-gui not produced"; exit 1; }
+
+      - name: Package MediaInfo.app + CLI tarball
+        run: |
+          set -euxo pipefail
+          GUI_BIN="MediaInfo/Project/GNU/GUI/mediainfo-gui"
+          [ -x "$GUI_BIN" ] || GUI_BIN="MediaInfo/Project/GNU/GUI/.libs/mediainfo-gui"
+          ./scripts/package-macos-app.sh "$GUI_BIN" "$GITHUB_WORKSPACE/MediaInfo" "$MEDIAINFO_VERSION" "$GITHUB_WORKSPACE/out/MediaInfo.app"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          # ad-hoc sign the CLI too so it runs without a Gatekeeper prompt
+          codesign -f -s - "MediaInfo/Project/GNU/CLI/mediainfo" || true
+          tar cJf "$GITHUB_WORKSPACE/out/mediainfo-cli-macos-${{ matrix.arch }}.tar.xz" -C "MediaInfo/Project/GNU/CLI" mediainfo
+          tar cJf "$GITHUB_WORKSPACE/out/MediaInfo-gui-macos-${{ matrix.arch }}.tar.xz" -C "$GITHUB_WORKSPACE/out" MediaInfo.app
+          shasum -a 256 "$GITHUB_WORKSPACE"/out/*.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mediainfo-macos-${{ matrix.arch }}
+          path: |
+            out/mediainfo-cli-macos-${{ matrix.arch }}.tar.xz
+            out/MediaInfo-gui-macos-${{ matrix.arch }}.tar.xz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Linux (x86_64) ---------------
+  linux:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout ZenLib
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_REF }}", path: ZenLib }
+      - name: Checkout MediaInfoLib
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
+      - name: Checkout MediaInfo
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
+
+      - name: Compute patch hash
+        id: keys
+        run: echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore built deps
+        id: depcache
+        if: ${{ github.event.inputs.force_rebuild_deps != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ZenLib
+            MediaInfoLib
+          key: deps-linux-x86_64-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-linux-${{ github.run_id }}
+          restore-keys: ccache-linux-
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            ccache autoconf automake libtool pkg-config build-essential git zlib1g-dev
+
+      - name: Build ZenLib + patched MediaInfoLib
+        if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
+        env: { CC: "ccache gcc", CXX: "ccache g++" }
+        run: ./scripts/build-deps.sh
+
+      - name: Build CLI
+        env: { CC: "ccache gcc", CXX: "ccache g++" }
+        run: |
+          set -euxo pipefail
+          cd MediaInfo/Project/GNU/CLI
+          autoreconf -if
+          ./configure --enable-staticlibs
+          make -j"$(nproc)"
+          test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
+          ./mediainfo --version
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          tar cJf "$GITHUB_WORKSPACE/out/mediainfo-cli-linux-x86_64.tar.xz" -C "MediaInfo/Project/GNU/CLI" mediainfo
+          sha256sum "$GITHUB_WORKSPACE"/out/*.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mediainfo-linux-x86_64
+          path: out/mediainfo-cli-linux-x86_64.tar.xz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Windows (scaffold) ----------
+  # Best-effort: MediaInfo ships an MSVC solution (Project/MSVC2026/MediaInfo-NoGUI.slnf) the
+  # official CI drives with msbuild. Wiring the patched MediaInfoLib into that solution build is
+  # left as a scaffold to iterate on in CI; it does not gate the release.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scaffold notice
+        shell: bash
+        run: |
+          echo "::warning::Windows build is a scaffold. Next step: check out the three repos, apply"
+          echo "::warning::patches/mediainfolib to MediaInfoLib, and msbuild Project/MSVC2026/MediaInfo-NoGUI.slnf."
+
+  # ---------------------------------------------------------------- Release (gated) --------------
+  # Runs only when every build job above succeeded (needs: + a guard). Publishes the collected
+  # artifacts to a GitHub Release tagged by run number.
+  release:
+    needs: [macos, linux]
+    if: ${{ success() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifacts
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          find artifacts -type f -name '*.tar.xz' -exec cp {} release/ \;
+          ls -l release
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: MediaInfo (MMT/TLV) build ${{ github.run_number }}
+          body: |
+            MediaInfo ${{ env.MEDIAINFO_VERSION }} (CLI + macOS wx GUI) built from source with the
+            File_MmtTlv MMT/TLV patches (patches/mediainfolib/) applied to MediaInfoLib.
+
+            Pinned: ZenLib ${{ env.ZENLIB_REF }}, MediaInfoLib ${{ env.MEDIAINFOLIB_REF }},
+            MediaInfo ${{ env.MEDIAINFO_REF }}.
+
+            macOS binaries are ad-hoc signed (not notarized). Clear the quarantine xattr before use:
+            xattr -dr com.apple.quarantine MediaInfo.app
+          files: release/*
+          fail_on_unmatched_files: true
