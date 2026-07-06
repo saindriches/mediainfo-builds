@@ -37,8 +37,11 @@ pushd "$SRC/MediaInfoLib"
 popd
 
 # build_lib <dir-under-SRC/Project/GNU/Library> <lib basename, e.g. libzen>
-# Configures + builds static. With ARCHS set, builds each arch into a temp copy of the .a and lipos
-# them into the final .libs/<lib>.a so the archive is universal.
+# Configures + builds static. With ARCHS set, builds each arch, stashes its .a OUTSIDE the build
+# tree (make clean between arches would wipe anything left in .libs/), then lipos the slices back
+# into .libs/<lib>.a so the archive is universal. --host only for the cross arch (a --host on the
+# native build pushes autotools into cross mode with an outdated config.sub that rejects arm64).
+NATIVE_ARCH="$(uname -m)"   # arm64 on Apple Silicon runners
 build_lib() {
   local dir="$1" lib="$2"
   pushd "$SRC/$dir/Project/GNU/Library"
@@ -47,18 +50,22 @@ build_lib() {
       ./configure --enable-static --disable-shared
       make -j"$jobs"
     else
-      local slices=()
+      local stash slices=()
+      stash="$(mktemp -d)"
       for a in $ARCHS; do
         make clean >/dev/null 2>&1 || true
-        ./configure --enable-static --disable-shared --host="${a}-apple-darwin" \
+        local host_opt=""
+        [ "$a" != "$NATIVE_ARCH" ] && host_opt="--host=${a}-apple-darwin"
+        ./configure --enable-static --disable-shared $host_opt \
           CFLAGS="-arch $a" CXXFLAGS="-arch $a" LDFLAGS="-arch $a"
         make -j"$jobs"
-        cp ".libs/${lib}.a" ".libs/${lib}-${a}.a"
-        slices+=(".libs/${lib}-${a}.a")
+        cp ".libs/${lib}.a" "$stash/${lib}-${a}.a"
+        slices+=("$stash/${lib}-${a}.a")
       done
+      # Rebuild the native arch last so .la and .libs match the machine, then overwrite the .a fat.
       lipo -create "${slices[@]}" -output ".libs/${lib}.a"
-      rm -f "${slices[@]}"
       lipo -info ".libs/${lib}.a"
+      rm -rf "$stash"
     fi
     test -f "${lib}.la" || { echo "::error::$lib .la not produced"; exit 1; }
   popd

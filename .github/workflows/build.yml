@@ -119,7 +119,9 @@ jobs:
           test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
           file mediainfo | grep -q 'Mach-O' || { echo "::error::CLI is a libtool wrapper, not a binary (stale shared deps cache?)"; exit 1; }
           lipo -info mediainfo
-          if otool -L mediainfo | tail -n +2 | grep -viqE '/usr/lib|/System'; then
+          # Only tab-indented path lines are real deps (a universal binary also prints per-arch
+          # "(architecture ...)" headers). Fail on any non-system dylib.
+          if otool -L mediainfo | grep $'^\t' | awk '{print $1}' | grep -qvE '^(/usr/lib|/System)/'; then
             echo "::error::CLI has a non-system dylib dep"; otool -L mediainfo; exit 1; fi
           ./mediainfo --version
 

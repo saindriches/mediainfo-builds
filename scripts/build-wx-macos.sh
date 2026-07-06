@@ -9,6 +9,8 @@
 # never line up for lipo). The catch is wx 3.2.6's bundled libpng, whose Intel-SSE path fails to
 # compile for the x86_64 slice (pngpriv.h pulls the classic 'fp.h'); since the MediaInfo GUI uses no
 # images (no wxImage/wxBitmap/PNG in Source/GUI/WxWidgets), we drop libpng/libjpeg/libtiff and svg.
+# --with-regex=builtin uses wx's bundled (universal, static) pcre instead of Homebrew's arm64-only
+# libpcre2, so the final GUI carries no non-system dylib and both slices resolve.
 #
 # Cached by the workflow, keyed on WX_VERSION. Idempotent: a present wx-config means a cache hit.
 set -euxo pipefail
@@ -37,6 +39,7 @@ cd "wxWidgets-${WX_VERSION}"
   --with-macosx-version-min=11.0 \
   --without-libpng --without-libjpeg --without-libtiff \
   --disable-svg \
+  --with-regex=builtin \
   --disable-sound --disable-mediactrl --disable-webview
 
 make -j"$jobs"

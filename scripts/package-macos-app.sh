@@ -30,10 +30,17 @@ sed -i '' -e "s/VERSION/${VERSION}/g" "$APP/Contents/Info.plist"
 printf '%s' 'APPL????' > "$APP/Contents/PkgInfo"
 cp "$MAC/MediaInfo.icns" "$APP/Contents/Resources/MediaInfo.icns"
 
+# List non-system dylib deps. otool -L on a universal binary prints a header line per arch
+# ("... (architecture arm64):") plus the binary path line; real deps are the tab-indented lines
+# with a path. Keep only tab-indented lines, then drop system + already-bundled paths.
+nonsystem_deps() {
+  otool -L "$1" | grep $'^\t' | awk '{print $1}' | grep -vE '^(/usr/lib|/System)/|^@executable_path/' || true
+}
+
 # With wx built static (build-wx-macos.sh) the binary should carry no non-system dylib. If any
-# non-system dylib slipped in (e.g. a Homebrew wx), bundle it into Contents/libs/ and rewrite the
-# load path to @executable_path/../libs, so the app stays self-contained either way.
-if otool -L "$APP/Contents/MacOS/MediaInfo" | tail -n +2 | grep -viqE '/usr/lib|/System|@executable_path'; then
+# slipped in (e.g. a Homebrew wx), bundle it into Contents/libs/ and rewrite the load path to
+# @executable_path/../libs, so the app stays self-contained either way.
+if [ -n "$(nonsystem_deps "$APP/Contents/MacOS/MediaInfo")" ]; then
   dylibbundler --overwrite-dir --bundle-deps --create-dir \
     --fix-file "$APP/Contents/MacOS/MediaInfo" \
     --dest-dir "$APP/Contents/libs" \
@@ -41,7 +48,7 @@ if otool -L "$APP/Contents/MacOS/MediaInfo" | tail -n +2 | grep -viqE '/usr/lib|
 fi
 
 # Fail if any non-system dylib dep still remains unresolved.
-if otool -L "$APP/Contents/MacOS/MediaInfo" | tail -n +2 | grep -viqE '/usr/lib|/System|@executable_path'; then
+if [ -n "$(nonsystem_deps "$APP/Contents/MacOS/MediaInfo")" ]; then
   echo "::error::MediaInfo.app still has an unbundled dylib dep"; otool -L "$APP/Contents/MacOS/MediaInfo"; exit 1
 fi
 
