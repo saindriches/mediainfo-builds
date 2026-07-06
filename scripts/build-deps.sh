@@ -20,10 +20,12 @@ fi
 
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-# ZenLib: the base library, built static in place.
+# ZenLib: the base library. --disable-shared so only libzen.a is produced; otherwise the linker
+# picks up the dylib and the CLI/GUI end up with a build-tree-relative libzen dynamic dep that will
+# not resolve on another machine. Static-only makes the final binaries self-contained.
 pushd "$SRC/ZenLib/Project/GNU/Library"
   autoreconf -if
-  ./configure --enable-static
+  ./configure --enable-static --disable-shared
   make -j"$jobs"
   test -f libzen.la || { echo "::error::ZenLib libzen.la not produced"; exit 1; }
 popd
@@ -38,7 +40,7 @@ pushd "$SRC/MediaInfoLib"
   done
   cd Project/GNU/Library
   autoreconf -if
-  ./configure --enable-static
+  ./configure --enable-static --disable-shared
   make -j"$jobs"
   test -f libmediainfo.la || { echo "::error::MediaInfoLib libmediainfo.la not produced"; exit 1; }
 popd
