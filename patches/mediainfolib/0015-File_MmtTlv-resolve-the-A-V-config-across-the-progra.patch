@@ -1,40 +1,27 @@
-From 82b052e620a760790e3b9c2d112ec05fea8dbe1b Mon Sep 17 00:00:00 2001
+From 822f77d35ad5ca88631bffbbf5667bea03ab17ae Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 06:19:15 +0900
 Subject: [PATCH] File_MmtTlv: resolve the A/V config across the
  program-boundary window
 
-The EIT p/f, the MH-video-component transfer, the ES and the clock all switch
-at different instants around a program boundary, and a program's opening
-segment runs about a minute before the real config appears. A histogram (or
-any first-value read) near the boundary reports the neighbour program's
-grade: an SDR program picked up stray HLG descriptors, and HDR programs
-opened during the opening segment read as SDR.
-
-Keep the newest transfer seen inside a boundary window (75 s from the
-present event's start) and let the p/f itself re-commit within that window,
-so a flip to the next program re-anchors it; the tail probe's MPT belongs to
-the next program and no longer votes. Boundary thresholds move to 60 s (EPG
-times are minute-granular) and the tail-of-previous-program hop sizes itself
-from the observed byte rate, so a whole minute is crossable. With no EIT the
-scan gives up after the same window instead of reading to EOF; files shorter
-than the window keep the newest values seen.
-
-Verified over 287 recordings: the one false HLG is gone, scrambled HDR still
-reads HLG from signaling, and rips that open inside a short filler program
-now commit the following main program.
+The p/f, descriptors, ES and clock switch at different instants around a
+boundary, and the opening segment runs about a minute, so a probe near the
+start reports the neighbour program's config. Prefer the newest transfer
+inside a window from the event start, let the p/f re-commit within it, and
+ignore the tail probe's next-program MPT. Boundary hops size themselves
+from the byte rate; with no EIT the scan gives up after the same window.
 
 Signed-off-by: Rainbaby <rainbaby@outlook.jp>
 ---
- Source/MediaInfo/Multiple/File_MmtTlv.cpp | 107 +++++++++++++++-------
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp | 102 +++++++++++++++-------
  Source/MediaInfo/Multiple/File_MmtTlv.h   |   3 +-
- 2 files changed, 77 insertions(+), 33 deletions(-)
+ 2 files changed, 72 insertions(+), 33 deletions(-)
 
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-index cb3c898..3311122 100644
+index cb3c898..ae9722f 100644
 --- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -122,17 +122,33 @@ namespace
+@@ -122,17 +122,32 @@ namespace
      const int64u BOUNDARY_HOP_BYTES             = 8 * 1024 * 1024;
      const int    BOUNDARY_MAX_HOPS              = 8;
      // Present event with under this long left at "now" is the previous program's
@@ -45,9 +32,8 @@ index cb3c898..3311122 100644
  
 -    // A present event's A/V config settles within this long of it going on air.
 -    const int64s SETTLE_SECONDS                 = 3;
-+    // A program's opening (studio) segment runs about a minute before the real A/V config
-+    // (transfer, channels) appears; keep scanning this long past the start, preferring the
-+    // newest value seen. Also the give-up horizon when the stream carries no EIT.
++    // The opening segment runs about a minute before the program's real A/V config;
++    // scan this long past the start, newest value wins. Also the no-EIT give-up.
 +    const int64s BOUNDARY_WINDOW_SECONDS        = 75;
 +
 +    // First clock this far before the present-event start = not this event's boundary.
@@ -74,7 +60,7 @@ index cb3c898..3311122 100644
      // MH-SDT recurs less often than MPT/EIT, so scan this far past core
      // completion to catch it.
      const int64u SDT_GRACE_PACKETS              = 20000;
-@@ -264,11 +280,12 @@ File_MmtTlv::File_MmtTlv()
+@@ -264,11 +279,12 @@ File_MmtTlv::File_MmtTlv()
      Mpt_AssetCount           = -1;
      Mpt_Version              = -1;
      Eit_Start_Utc            = -1;
@@ -88,7 +74,7 @@ index cb3c898..3311122 100644
      Media_Probe_Done         = false;
      Media_Bytes              = 0;
      Now_Utc                  = -1;
-@@ -506,14 +523,13 @@ void File_MmtTlv::Streams_Finish()
+@@ -506,14 +522,13 @@ void File_MmtTlv::Streams_Finish()
          //From 0x8010: transfer overrides the HEVC VUI; geometry and colour fill the ES's gaps.
          if (M.StreamKind == Stream_Video)
          {
@@ -108,7 +94,7 @@ index cb3c898..3311122 100644
                  {
                      if (Retrieve_Const(Stream_Video, M.StreamPos, Video_colour_primaries).empty())
                          Fill(Stream_Video, M.StreamPos, Video_colour_primaries, Mpegv_colour_primaries(9));
-@@ -720,16 +736,12 @@ void File_MmtTlv::Data_Parse()
+@@ -720,16 +735,12 @@ void File_MmtTlv::Data_Parse()
          return;
      }
  
@@ -128,7 +114,7 @@ index cb3c898..3311122 100644
      };
      bool Settled = probe_settled();
      switch ((int8u)Element_Code)
-@@ -766,6 +778,10 @@ void File_MmtTlv::Data_Parse()
+@@ -766,6 +777,10 @@ void File_MmtTlv::Data_Parse()
      if (Mpt_Found && MediaParsers.empty())
          Media_Probe_Done = true;
  
@@ -139,15 +125,14 @@ index cb3c898..3311122 100644
      //Grace past core completion for the less-frequent MH-SDT.
      bool CoreComplete = (Mpt_Found && Eit_Present_Found && Media_Probe_Done);
      if (CoreComplete && Core_Done_At == (int64u)-1)
-@@ -777,12 +793,21 @@ void File_MmtTlv::Data_Parse()
+@@ -777,12 +792,20 @@ void File_MmtTlv::Data_Parse()
                       && (Sdt_Found
                        || (Core_Done_At != (int64u)-1
                         && Packets_Since_Accept - Core_Done_At >= SDT_GRACE_PACKETS));
 -    if (ScanComplete)
 +
-+    // No EPG: media probed but no present event within the boundary window of it. The stream
-+    // has no EIT (for example a raw service capture); stop the forward scan now instead of
-+    // reading to the give-up or EOF (the whole file).
++    // No EIT within the boundary window of the media probe (a raw service capture):
++    // stop the forward scan instead of reading on to the give-up or EOF.
 +    bool NoEpgDone = !ScanComplete && Mpt_Found && Media_Probe_Done && !Eit_Present_Found
 +                  && Media_Done_Utc >= 0 && Now_Utc >= 0
 +                  && Now_Utc - Media_Done_Utc >= BOUNDARY_WINDOW_SECONDS;
@@ -166,7 +151,7 @@ index cb3c898..3311122 100644
          {
              Phase = Phase_Tail;
              Pts_Last_At_Tail = Pts_Last_Us; //require a fresher PTS from the tail
-@@ -1333,7 +1358,8 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+@@ -1333,7 +1356,8 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
                      // 01 = superimpose, 00 = subtitle.
                      if (dlen >= 8 && RB16(db) == 0x0020)
                          superimpose = ((db[7] >> 6) & 0x03) == 0x01;
@@ -176,23 +161,21 @@ index cb3c898..3311122 100644
                  {
                      // component_type(db[1]) = dialog<<7 | handicapped(2)<<5 |
                      // audio_mode(5); flags(db[6]) has main_component/ES_multi;
-@@ -1355,9 +1381,12 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+@@ -1355,9 +1379,10 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
                  }
                  else if (dtag == 0x8010) // MH_VIDEO_COMPONENT_DESCRIPTOR
                  {
 -                    //Transfer (b4 hi nibble); histogram so stray MPTs can't flip SDR to HDR.
 -                    if (dlen >= 5 && (db[4] >> 4) < 8)
 -                        TransferSeen[db[4] >> 4]++;
-+                    //Transfer (b4 hi nibble). Keep the newest of the head scan: the opening
-+                    //segment's grade gives way to the program's real one inside the boundary
-+                    //window, so the last value seen is the program's. The tail probe's MPT is
-+                    //the NEXT program's, so it must not vote.
++                    //Transfer (b4 hi nibble): newest head-scan value wins (the opening
++                    //segment gives way); the tail probe's MPT is the next program's, no vote.
 +                    if (Phase != Phase_Tail && dlen >= 5 && (db[4] >> 4) >= 1 && (db[4] >> 4) < 8)
 +                        Transfer_Last = db[4] >> 4;
                      //b0 resolution|aspect, b1 scan|frame_rate (STD-B60 Table 7-47).
                      if (dlen >= 2)
                      {
-@@ -1411,6 +1440,7 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
+@@ -1411,6 +1436,7 @@ void File_MmtTlv::Parse_Mpt(const int8u* Data, size_t Size)
              Mpt_Version      = Data[1];
              Media_Probe_Done = false;
              Core_Done_At     = (int64u)-1;
@@ -200,19 +183,18 @@ index cb3c898..3311122 100644
          }
          Mpt_AssetCount = Media;
          Assets    = Found;
-@@ -1543,7 +1573,10 @@ void File_MmtTlv::Extract_MpuTimestamps(const int8u* Data, size_t Size)
+@@ -1543,7 +1569,9 @@ void File_MmtTlv::Extract_MpuTimestamps(const int8u* Data, size_t Size)
  //---------------------------------------------------------------------------
  void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
  {
 -    if (Eit_Present_Found)
-+    // The p/f is itself a boundary-window value: keep re-reading it until the window has
-+    // passed, so a flip to the next program re-commits and re-anchors the window. That also
-+    // covers the first EIT preceding the first clock (hop check and anchor were skipped).
++    // The p/f is itself a boundary-window value: re-read until the window passes, so a
++    // flip re-commits and re-anchors (the first EIT can precede the first clock).
 +    if (Eit_Present_Found && boundary_window_passed(Eit_Start_Utc, Now_First, Now_Utc))
          return;
      // table_id(8) section_syntax+len(16); section_length = low 12 bits.
      if (Size < 3) return;
-@@ -1618,14 +1651,24 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
+@@ -1618,14 +1646,24 @@ void File_MmtTlv::Parse_MhEit(const int8u* Data, size_t Size)
                      Assets.clear();
                      Mpt_Found        = false;
                      Mpt_AssetCount   = -1;
