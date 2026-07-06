@@ -42,7 +42,7 @@ env:
   MEDIAINFO_VERSION: "26.05"
   WX_VERSION: "3.2.6"
   MACOS_ARCHS: "arm64 x86_64"
-  CACHE_EPOCH: "3"
+  CACHE_EPOCH: "4"
 
 jobs:
   # ---------------------------------------------------------------- macOS (universal2) -----------
@@ -67,9 +67,11 @@ jobs:
         uses: actions/checkout@v4
         with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
 
-      - name: Compute patch hash
+      - name: Compute cache hashes
         id: keys
-        run: echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "wx_hash=$(shasum -a 256 scripts/build-wx-macos.sh | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore built deps (ZenLib + MediaInfoLib)
         id: depcache
@@ -86,7 +88,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.WX_PREFIX }}
-          key: wx-macos-uni-${{ env.WX_VERSION }}-epoch${{ env.CACHE_EPOCH }}
+          key: wx-macos-uni-${{ env.WX_VERSION }}-${{ steps.keys.outputs.wx_hash }}-epoch${{ env.CACHE_EPOCH }}
 
       - name: ccache
         uses: actions/cache@v4
