@@ -1,15 +1,16 @@
-From 822f77d35ad5ca88631bffbbf5667bea03ab17ae Mon Sep 17 00:00:00 2001
+From 11fcc393562a8cb61b58bfb24e8515f30f94956f Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 06:19:15 +0900
 Subject: [PATCH] File_MmtTlv: resolve the A/V config across the
  program-boundary window
 
-The p/f, descriptors, ES and clock switch at different instants around a
-boundary, and the opening segment runs about a minute, so a probe near the
-start reports the neighbour program's config. Prefer the newest transfer
-inside a window from the event start, let the p/f re-commit within it, and
-ignore the tail probe's next-program MPT. Boundary hops size themselves
-from the byte rate; with no EIT the scan gives up after the same window.
+Around a boundary the p/f, the descriptors, the ES and the clock switch at
+different instants, so a probe near the start picks up the neighbour
+program's strays; and a program's own config may only settle about a
+minute in (opening segment). Prefer the newest value inside a window from
+the event start, let the p/f re-commit within it, and ignore the tail
+probe's next-program MPT. Boundary hops size themselves from the byte
+rate; with no EIT the scan gives up after the same window.
 
 Signed-off-by: Rainbaby <rainbaby@outlook.jp>
 ---
@@ -18,7 +19,7 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  2 files changed, 72 insertions(+), 33 deletions(-)
 
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-index cb3c898..ae9722f 100644
+index cb3c898..aa531a4 100644
 --- a/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 @@ -122,17 +122,32 @@ namespace
@@ -32,7 +33,7 @@ index cb3c898..ae9722f 100644
  
 -    // A present event's A/V config settles within this long of it going on air.
 -    const int64s SETTLE_SECONDS                 = 3;
-+    // The opening segment runs about a minute before the program's real A/V config;
++    // A program's config may only settle about a minute in (opening segment);
 +    // scan this long past the start, newest value wins. Also the no-EIT give-up.
 +    const int64s BOUNDARY_WINDOW_SECONDS        = 75;
 +
