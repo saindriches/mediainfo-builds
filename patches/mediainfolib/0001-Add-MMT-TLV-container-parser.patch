@@ -1,4 +1,4 @@
-From 0b2c500d77d334cc4781dc604722e59ee7299517 Mon Sep 17 00:00:00 2001
+From 90dfe3a91ec25193449af80962147ddce65794fc Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -24,12 +24,12 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
  Source/MediaInfo/Multiple/File_Mmt.cpp        |  420 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  146 ++
- Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1608 +++++++++++++++++
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1610 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
  .../Multiple/File_Mmt_Descriptors.cpp         |  398 ++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 2847 insertions(+), 1 deletion(-)
+ 10 files changed, 2849 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -698,10 +698,10 @@ index 0000000..09b3970
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..d69b16f
+index 0000000..f5f60f0
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -0,0 +1,1608 @@
+@@ -0,0 +1,1610 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -2230,6 +2230,7 @@ index 0000000..d69b16f
 +        case TABLE_ECM_0:   // presence = CAS active; not parsed
 +        case TABLE_ECM_1:   Ecm_Seen = true; // and name it in the trace, below
 +        default:
++            #if MEDIAINFO_TRACE
 +            //Not parsed, but under --Details=1 route through the signaling
 +            //sub-parser so recognized B60 tables (Table 4-8) show by name.
 +            if (Trace_Activated)
@@ -2241,6 +2242,7 @@ index 0000000..d69b16f
 +                Open_Buffer_Continue(&Signaling, Data, Size);
 +                Open_Buffer_Finalize(&Signaling);
 +            }
++            #endif //MEDIAINFO_TRACE
 +            break;
 +    }
 +}
