@@ -1,4 +1,4 @@
-From 09053f71840385e3420410e8317d38b87f08f55c Mon Sep 17 00:00:00 2001
+From 64301c492b72b725bdad9c1d31e0582d0c7d7f63 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -24,12 +24,12 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
  Source/MediaInfo/Multiple/File_Mmt.cpp        |  461 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  167 ++
- Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1601 +++++++++++++++++
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1604 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  194 ++
  .../Multiple/File_Mmt_Descriptors.cpp         |  556 ++++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 3061 insertions(+), 1 deletion(-)
+ 10 files changed, 3064 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -760,10 +760,10 @@ index 0000000..3da7bae
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..b9617a1
+index 0000000..71ca4b1
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -0,0 +1,1601 @@
+@@ -0,0 +1,1604 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -1329,13 +1329,10 @@ index 0000000..b9617a1
 +    }
 +    MediaParsers.clear();
 +
-+    //Stream start/end wall clock (UTC), the same fields File_MpegTs uses.
++    //Stream start wall clock (UTC), the same field File_MpegTs uses.
 +    if (Now_First >= 0)
 +        Fill(Stream_General, 0, General_Duration_Start,
 +             Ztring().Date_From_Seconds_1970(Now_First));
-+    if (Now_Last > Now_First)
-+        Fill(Stream_General, 0, General_Duration_End,
-+             Ztring().Date_From_Seconds_1970(Now_Last));
 +
 +    //Stream span, distinct from the Menu Duration (scheduled event length). Prefer the
 +    //MPU-PTS span (sub-second), but when the NTP clock ran materially longer the tail PTS was
@@ -1359,6 +1356,12 @@ index 0000000..b9617a1
 +            Fill(Stream_Video, Pos, Video_Duration, span_ms, 3);
 +        for (size_t Pos = 0; Pos < Count_Get(Stream_Audio); ++Pos)
 +            Fill(Stream_Audio, Pos, Audio_Duration, span_ms, 3);
++        //End clock = start + span, so Start/Duration/End stay consistent (the clock
++        //is whole-second while the span is sub-second PTS, so the last raw clock can
++        //differ by a second or two).
++        if (Now_First >= 0)
++            Fill(Stream_General, 0, General_Duration_End,
++                 Ztring().Date_From_Seconds_1970(Now_First + (int64s)(span_ms / 1000.0 + 0.5)));
 +    }
 +}
 +
