@@ -1,4 +1,4 @@
-From 90dfe3a91ec25193449af80962147ddce65794fc Mon Sep 17 00:00:00 2001
+From 2f0e51f4dedd3e6e7ba743b7ae85c104af379a08 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -22,14 +22,14 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Project/CMake/CMakeLists.txt                  |    3 +
  Source/MediaInfo/File__MultipleParsing.cpp    |    6 +
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
- Source/MediaInfo/Multiple/File_Mmt.cpp        |  420 +++++
+ Source/MediaInfo/Multiple/File_Mmt.cpp        |  462 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  146 ++
  Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1610 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
- .../Multiple/File_Mmt_Descriptors.cpp         |  398 ++++
+ .../Multiple/File_Mmt_Descriptors.cpp         |  425 +++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 2849 insertions(+), 1 deletion(-)
+ 10 files changed, 2918 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -120,10 +120,10 @@ index 73507d3..d500403 100644
       || defined(MEDIAINFO_CMML_NO)  || defined(MEDIAINFO_KATE_NO)  || defined(MEDIAINFO_PGS_NO) || defined(MEDIAINFO_OTHERTEXT_NO) \
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.cpp b/Source/MediaInfo/Multiple/File_Mmt.cpp
 new file mode 100644
-index 0000000..a3d31df
+index 0000000..b368d85
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.cpp
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,462 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -261,9 +261,14 @@ index 0000000..a3d31df
 +    }
 +    else
 +    {
-+        int16u section;
-+        Get_B2 (section,                                        "section_syntax_indicator / section_length");
-+        Size = (int64u)3 + (section & 0x0FFF);
++        int16u section_length;
++        BS_Begin();
++        Skip_SB(                                                "section_syntax_indicator");
++        Skip_SB(                                                "reserved_future_use");
++        Skip_S1(2,                                              "reserved");
++        Get_S2 (12, section_length,                             "section_length");
++        BS_End();
++        Size = (int64u)3 + section_length;
 +    }
 +    if (Element_Size && Size > Element_Size)
 +        Size = Element_Size; // a truncated final table: parse against what we have
@@ -299,7 +304,8 @@ index 0000000..a3d31df
 +//---------------------------------------------------------------------------
 +void File_Mmt::MhTot()
 +{
-+    //40-bit JST time: MJD(16) + BCD HHMMSS(24), then a CRC we do not verify.
++    //JST_time (40): MJD(16) + BCD HHMMSS(24), then a descriptor loop and a CRC
++    //we do not verify.
 +    if (Element_Size - Element_Offset < 5)
 +    {
 +        Skip_XX(Element_Size - Element_Offset,                  "Data");
@@ -309,6 +315,18 @@ index 0000000..a3d31df
 +    int32u hms;
 +    Get_B2 (mjd,                                                "MJD");
 +    Get_B3 (hms,                                                "JST_time (BCD)");
++    if (Element_Size - Element_Offset >= 2)
++    {
++        int16u dll;
++        BS_Begin();
++        Skip_S1(4,                                              "reserved");
++        Get_S2 (12, dll,                                        "descriptors_loop_length");
++        BS_End();
++        if (Element_Offset + dll > Element_Size)
++            dll = (int16u)(Element_Size - Element_Offset);
++        if (dll)
++            Skip_XX(dll,                                        "descriptors");
++    }
 +    if (Element_Offset < Element_Size)
 +        Skip_XX(Element_Size - Element_Offset,                  "CRC32");
 +
@@ -330,7 +348,10 @@ index 0000000..a3d31df
 +        return;
 +    int8u pkg_id_len, number_of_assets;
 +    int16u mpt_desc_len;
-+    Skip_B1(                                                    "MPT_mode");
++    BS_Begin();
++    Skip_S1(6,                                                  "reserved");
++    Skip_S1(2,                                                  "MPT_mode");
++    BS_End();
 +    Get_B1 (pkg_id_len,                                         "MMT_package_id_length");
 +    if (Element_Offset + pkg_id_len > Element_Size) return;
 +    Skip_XX(pkg_id_len,                                         "MMT_package_id");
@@ -367,7 +388,10 @@ index 0000000..a3d31df
 +        if (Element_Size - Element_Offset < 4) { Element_End0(); break; }
 +        Get_L4 (asset_type,                                     "asset_type"); //FourCC (little-endian)
 +        if (Element_Size - Element_Offset < 1) { Element_End0(); break; }
-+        Skip_B1(                                                "asset_clock_relation_flag");
++        BS_Begin();
++        Skip_S1(7,                                              "reserved");
++        Skip_SB(                                                "asset_clock_relation_flag");
++        BS_End();
 +        if (Element_Size - Element_Offset < 1) { Element_End0(); break; }
 +        Get_B1 (location_count,                                 "location_count");
 +
@@ -429,16 +453,19 @@ index 0000000..a3d31df
 +//---------------------------------------------------------------------------
 +void File_Mmt::MhEit()
 +{
-+    //The present event leads section 0 (current_next==1). Header: service_id(16)
-+    //rvci(8) section_number(8) last_section(8) TLV_stream_id(16)
-+    //original_network_id(16) segment_last(8) last_table_id(8) = 11 bytes. The
-+    //container keeps the boundary-window/hop logic; here we only extract fields.
++    //The present event leads section 0 (current_next==1). The container keeps
++    //the boundary-window/hop logic; here we only extract fields.
 +    if (!Complete_Stream || Element_Size - Element_Offset < 11)
 +        return;
 +    int16u service_id, tlv_stream_id;
-+    int8u  version_byte, section_number;
++    int8u  section_number;
++    bool   current_next_indicator;
 +    Get_B2 (service_id,                                         "service_id");
-+    Get_B1 (version_byte,                                       "reserved / version / current_next_indicator");
++    BS_Begin();
++    Skip_S1(2,                                                  "reserved");
++    Skip_S1(5,                                                  "version_number");
++    Get_SB (current_next_indicator,                             "current_next_indicator");
++    BS_End();
 +    Get_B1 (section_number,                                     "section_number");
 +    Skip_B1(                                                    "last_section_number");
 +    Get_B2 (tlv_stream_id,                                      "TLV_stream_id");
@@ -449,7 +476,7 @@ index 0000000..a3d31df
 +    Complete_Stream->EitSvcIdFound = true;
 +    Complete_Stream->TlvStreamId   = tlv_stream_id;
 +
-+    if (section_number != 0 || !(version_byte & 1))
++    if (section_number != 0 || !current_next_indicator)
 +        return;
 +
 +    int64u End = Element_Size >= 4 ? Element_Size - 4 : Element_Size; // drop CRC32
@@ -462,8 +489,12 @@ index 0000000..a3d31df
 +    Get_B2 (start_date,                                         "start_time (MJD)");
 +    Get_B3 (start_time,                                         "start_time (BCD HHMMSS)");
 +    Get_B3 (duration,                                           "duration (BCD HHMMSS)");
-+    Get_B2 (dll,                                                "descriptors_loop_length");
-+    int16u desc_loop_len = dll & 0x0FFF;
++    BS_Begin();
++    Skip_S1(3,                                                  "running_status");
++    Skip_SB(                                                    "free_CA_mode");
++    Get_S2 (12, dll,                                            "descriptors_loop_length");
++    BS_End();
++    int16u desc_loop_len = dll;
 +    if (Element_Offset + desc_loop_len > End)
 +        desc_loop_len = (int16u)(End - Element_Offset);
 +    if (desc_loop_len)
@@ -497,11 +528,15 @@ index 0000000..a3d31df
 +    }
 +    int16u tlv_stream_id;
 +    Get_B2 (tlv_stream_id,                                      "TLV_stream_id");
-+    Skip_B1(                                                    "version / current_next_indicator");
++    BS_Begin();
++    Skip_S1(2,                                                  "reserved");
++    Skip_S1(5,                                                  "version_number");
++    Skip_SB(                                                    "current_next_indicator");
++    BS_End();
 +    Skip_B1(                                                    "section_number");
 +    Skip_B1(                                                    "last_section_number");
 +    Skip_B2(                                                    "original_network_id");
-+    Skip_B1(                                                    "reserved");
++    Skip_B1(                                                    "reserved_future_use");
 +    if (Complete_Stream)
 +        Complete_Stream->TlvStreamId = tlv_stream_id;
 +
@@ -511,9 +546,16 @@ index 0000000..a3d31df
 +        Element_Begin1("service");
 +        int16u service_id, dll_word;
 +        Get_B2 (service_id,                                     "service_id");
-+        Skip_B1(                                                "EIT flags");
-+        Get_B2 (dll_word,                                       "running_status / free_CA_mode / descriptors_loop_length");
-+        int16u desc_len = dll_word & 0x0FFF;
++        BS_Begin();
++        Skip_S1(3,                                              "reserved_future_use");
++        Skip_S1(3,                                              "EIT_user_defined_flags");
++        Skip_SB(                                                "EIT_schedule_flag");
++        Skip_SB(                                                "EIT_present_following_flag");
++        Skip_S1(3,                                              "running_status");
++        Skip_SB(                                                "free_CA_mode");
++        Get_S2 (12, dll_word,                                   "descriptors_loop_length");
++        BS_End();
++        int16u desc_len = dll_word;
 +        if (Element_Offset + desc_len > End)
 +            desc_len = (int16u)(End - Element_Offset);
 +
@@ -698,7 +740,7 @@ index 0000000..09b3970
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..f5f60f0
+index 0000000..1063310
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 @@ -0,0 +1,1610 @@
@@ -2231,8 +2273,8 @@ index 0000000..f5f60f0
 +        case TABLE_ECM_1:   Ecm_Seen = true; // and name it in the trace, below
 +        default:
 +            #if MEDIAINFO_TRACE
-+            //Not parsed, but under --Details=1 route through the signaling
-+            //sub-parser so recognized B60 tables (Table 4-8) show by name.
++            //Not parsed; route through the signaling sub-parser only for the
++            //trace, so recognized B60 tables (Table 4-8) show by name.
 +            if (Trace_Activated)
 +            {
 +                mmt_stream Stream;
@@ -2513,10 +2555,10 @@ index 0000000..4d54d5a
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
 new file mode 100644
-index 0000000..539f703
+index 0000000..d9b1907
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,425 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -2756,64 +2798,88 @@ index 0000000..539f703
 +//---------------------------------------------------------------------------
 +void File_Mmt_Descriptors::Descriptor_8010()
 +{
-+    //b0 resolution|aspect, b1 scan|frame_rate (STD-B60 Table 7-47); the transfer
-+    //characteristics nibble is the high nibble of b4 (Table 7-51).
-+    int64u avail = Element_Size - Element_Offset;
-+    if (avail >= 2 && CurrentAsset)
++    if (Element_Size - Element_Offset < 2 || !CurrentAsset)
 +    {
-+        int8u b0, b1;
-+        Get_B1 (b0,                                             "video_resolution / video_aspect_ratio");
-+        Get_B1 (b1,                                             "scan / frame_rate");
-+        CurrentAsset->VideoResolution = b0 >> 4;
-+        CurrentAsset->VideoAspect     = b0 & 0x0F;
-+        CurrentAsset->VideoScan       = b1 >> 7;
-+        CurrentAsset->VideoFrameRate  = b1 & 0x1F;
-+        if (avail >= 5)
-+        {
-+            int8u b4;
-+            Skip_B2(                                            "cc_type / etc.");
-+            Get_B1 (b4,                                         "transfer_characteristics");
-+            int8u transfer = b4 >> 4;
-+            if (Complete_Stream && transfer >= 1 && transfer < 8)
-+                Complete_Stream->TransferLast = transfer; // container applies the phase gate
-+        }
++        if (Element_Offset < Element_Size)
++            Skip_XX(Element_Size - Element_Offset,              "Data");
++        return;
++    }
++    int8u video_resolution, video_aspect_ratio, video_scan_flag, video_frame_rate;
++    BS_Begin();
++    Get_S1 (4, video_resolution,                                "video_resolution");
++    Get_S1 (4, video_aspect_ratio,                              "video_aspect_ratio");
++    Get_S1 (1, video_scan_flag,                                 "video_scan_flag");
++    Skip_S1(2,                                                  "reserved");
++    Get_S1 (5, video_frame_rate,                                "video_frame_rate");
++    BS_End();
++    CurrentAsset->VideoResolution = video_resolution;
++    CurrentAsset->VideoAspect     = video_aspect_ratio;
++    CurrentAsset->VideoScan       = video_scan_flag;
++    CurrentAsset->VideoFrameRate  = video_frame_rate;
++    if (Element_Size - Element_Offset >= 3)
++    {
++        int8u transfer;
++        Skip_B2(                                                "component_tag");
++        BS_Begin();
++        Get_S1 (4, transfer,                                    "video_transfer_characteristics");
++        Skip_S1(4,                                              "reserved");
++        BS_End();
++        if (Complete_Stream && transfer >= 1 && transfer < 8)
++            Complete_Stream->TransferLast = transfer; // container applies the phase gate
++    }
++    if (Element_Size - Element_Offset >= 3)
++    {
++        Ztring Language;
++        Get_UTF8(3, Language,                                   "ISO_639_language_code");
 +    }
 +    if (Element_Offset < Element_Size)
-+        Skip_XX(Element_Size - Element_Offset,                  "Data");
++        Skip_XX(Element_Size - Element_Offset,                  "text");
 +}
 +
 +//---------------------------------------------------------------------------
 +void File_Mmt_Descriptors::Descriptor_8014()
 +{
-+    //component_type = dialog<<7 | handicapped(2)<<5 | audio_mode(5); the flags
-+    //byte carries ES_multi + main_component + the sampling_rate code; then the
-+    //3-byte language (a second when ES_multi) and the UTF-8 component text.
-+    if (Element_Size - Element_Offset >= 10 && CurrentAsset)
++    //component_type packs the handicapped mode (bits 6-5) and audio_mode (bits
++    //4-0); the flags byte carries ES_multi, main_component and the sampling_rate
++    //code, then the 3-byte language (a second when ES_multi) and the UTF-8 text.
++    if (Element_Size - Element_Offset < 10 || !CurrentAsset)
 +    {
-+        int8u component_type, flags;
-+        Skip_B1(                                                "stream_content / reserved");
-+        Get_B1 (component_type,                                 "component_type");
-+        Skip_XX(4,                                              "MPT_stream_index / component_tag / ...");
-+        Get_B1 (flags,                                          "ES_multi / main_component / quality / sampling_rate");
-+        CurrentAsset->Handicapped   = (component_type >> 5) & 0x03;
-+        CurrentAsset->AudioMode     = component_type & 0x1F;
-+        bool es_multi               = (flags >> 7) & 1;
-+        CurrentAsset->MainComponent = (flags >> 6) & 1;
-+        CurrentAsset->SamplingCode  = (flags >> 1) & 0x07;
-+        Ztring Language;
-+        Get_UTF8(3, Language,                                   "ISO_639_language_code");
-+        CurrentAsset->Language = Language;
-+        if (es_multi && Element_Size - Element_Offset >= 3)
-+            Skip_XX(3,                                          "ISO_639_language_code_2");
 +        if (Element_Offset < Element_Size)
-+        {
-+            Ztring Text;
-+            Get_UTF8(Element_Size - Element_Offset, Text,       "text");
-+            CurrentAsset->Title = Text;
-+        }
++            Skip_XX(Element_Size - Element_Offset,              "Data");
++        return;
 +    }
++    int8u component_type, sampling_rate;
++    bool  es_multi, main_component;
++    BS_Begin();
++    Skip_S1(4,                                                  "reserved_future_use");
++    Skip_S1(4,                                                  "stream_content");
++    BS_End();
++    Get_B1 (component_type,                                     "component_type");
++    Skip_B2(                                                    "component_tag");
++    Skip_B1(                                                    "stream_type");
++    Skip_B1(                                                    "simulcast_group_tag");
++    BS_Begin();
++    Get_SB (es_multi,                                           "ES_multi_lingual_flag");
++    Get_SB (main_component,                                     "main_component_flag");
++    Skip_S1(2,                                                  "quality_indicator");
++    Get_S1 (3, sampling_rate,                                   "sampling_rate");
++    Skip_SB(                                                    "reserved_future_use");
++    BS_End();
++    CurrentAsset->Handicapped   = (component_type >> 5) & 0x03;
++    CurrentAsset->AudioMode     = component_type & 0x1F;
++    CurrentAsset->MainComponent = main_component;
++    CurrentAsset->SamplingCode  = sampling_rate;
++    Ztring Language;
++    Get_UTF8(3, Language,                                       "ISO_639_language_code");
++    CurrentAsset->Language = Language;
++    if (es_multi && Element_Size - Element_Offset >= 3)
++        Skip_UTF8(3,                                            "ISO_639_language_code_2");
 +    if (Element_Offset < Element_Size)
-+        Skip_XX(Element_Size - Element_Offset,                  "Data");
++    {
++        Ztring Text;
++        Get_UTF8(Element_Size - Element_Offset, Text,           "text");
++        CurrentAsset->Title = Text;
++    }
 +}
 +
 +//---------------------------------------------------------------------------
@@ -2829,12 +2895,15 @@ index 0000000..539f703
 +        if (data_component_id == 0x0020)
 +        {
 +            Ztring Language;
-+            int8u  b;
++            int8u  subtitle_type;
 +            Skip_XX(2,                                          "Additional_Arib_Subtitle_Info");
 +            Get_UTF8(3, Language,                               "ISO_639_language_code");
-+            Get_B1 (b,                                          "subtitle type / DMF");
++            BS_Begin();
++            Get_S1 (2, subtitle_type,                           "subtitle_type");
++            Skip_S1(6,                                          "reserved");
++            BS_End();
 +            CurrentAsset->Language    = Language;
-+            CurrentAsset->Superimpose = ((b >> 6) & 0x03) == 0x01;
++            CurrentAsset->Superimpose = subtitle_type == 0x01;
 +        }
 +    }
 +    if (Element_Offset < Element_Size)
