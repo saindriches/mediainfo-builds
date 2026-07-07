@@ -1,4 +1,4 @@
-From 2f0e51f4dedd3e6e7ba743b7ae85c104af379a08 Mon Sep 17 00:00:00 2001
+From d93bfe8e6aa14ca3e85bc7df03edef34e02f3928 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -22,14 +22,14 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Project/CMake/CMakeLists.txt                  |    3 +
  Source/MediaInfo/File__MultipleParsing.cpp    |    6 +
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
- Source/MediaInfo/Multiple/File_Mmt.cpp        |  462 +++++
+ Source/MediaInfo/Multiple/File_Mmt.cpp        |  477 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  146 ++
  Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1610 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
- .../Multiple/File_Mmt_Descriptors.cpp         |  425 +++++
+ .../Multiple/File_Mmt_Descriptors.cpp         |  554 ++++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 2918 insertions(+), 1 deletion(-)
+ 10 files changed, 3062 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -120,10 +120,10 @@ index 73507d3..d500403 100644
       || defined(MEDIAINFO_CMML_NO)  || defined(MEDIAINFO_KATE_NO)  || defined(MEDIAINFO_PGS_NO) || defined(MEDIAINFO_OTHERTEXT_NO) \
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.cpp b/Source/MediaInfo/Multiple/File_Mmt.cpp
 new file mode 100644
-index 0000000..b368d85
+index 0000000..b44a7c5
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.cpp
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,477 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -202,6 +202,19 @@ index 0000000..b368d85
 +        if (table_id >= 0x89 && table_id <= 0x8A) return "DMM";
 +        if (table_id >= 0x8C && table_id <= 0x9B) return "MH-EIT (schedule)";
 +        return "";
++    }
++
++    //running_status meaning (ARIB STD-B60 Table 7-19); "" if not annotated.
++    const char* Mmt_running_status(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "In non-operation";
++            case 2 : return "It will start within several seconds";
++            case 3 : return "Out of operation";
++            case 4 : return "In operation";
++            default: return "";
++        }
 +    }
 +
 +    inline int bcd2(int8u b) { return (b >> 4) * 10 + (b & 0x0F); }
@@ -489,8 +502,9 @@ index 0000000..b368d85
 +    Get_B2 (start_date,                                         "start_time (MJD)");
 +    Get_B3 (start_time,                                         "start_time (BCD HHMMSS)");
 +    Get_B3 (duration,                                           "duration (BCD HHMMSS)");
++    int8u running_status;
 +    BS_Begin();
-+    Skip_S1(3,                                                  "running_status");
++    Get_S1 (3, running_status,                                  "running_status"); Param_Info1(Mmt_running_status(running_status));
 +    Skip_SB(                                                    "free_CA_mode");
 +    Get_S2 (12, dll,                                            "descriptors_loop_length");
 +    BS_End();
@@ -546,12 +560,13 @@ index 0000000..b368d85
 +        Element_Begin1("service");
 +        int16u service_id, dll_word;
 +        Get_B2 (service_id,                                     "service_id");
++        int8u running_status;
 +        BS_Begin();
 +        Skip_S1(3,                                              "reserved_future_use");
 +        Skip_S1(3,                                              "EIT_user_defined_flags");
 +        Skip_SB(                                                "EIT_schedule_flag");
 +        Skip_SB(                                                "EIT_present_following_flag");
-+        Skip_S1(3,                                              "running_status");
++        Get_S1 (3, running_status,                              "running_status"); Param_Info1(Mmt_running_status(running_status));
 +        Skip_SB(                                                "free_CA_mode");
 +        Get_S2 (12, dll_word,                                   "descriptors_loop_length");
 +        BS_End();
@@ -2555,10 +2570,10 @@ index 0000000..4d54d5a
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
 new file mode 100644
-index 0000000..d9b1907
+index 0000000..8980ed3
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,554 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -2674,6 +2689,134 @@ index 0000000..d9b1907
 +            case 0xF005 : return "MH-broadcast_id_descriptor";
 +            case 0xF006 : return "MH-network_identification_descriptor";
 +            default     : return "";
++        }
++    }
++
++    //Coded-field meanings (ARIB STD-B60); "" leaves the field with no annotation.
++    const char* Mmt_video_resolution(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "180";
++            case 2 : return "240";
++            case 3 : return "480 (525)";
++            case 4 : return "720 (750)";
++            case 5 : return "1080 (1125)";
++            case 6 : return "2160";
++            case 7 : return "4320";
++            default: return "";
++        }
++    }
++    const char* Mmt_video_aspect_ratio(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "4:3";
++            case 2 : return "16:9 with pan vector";
++            case 3 : return "16:9 without pan vector";
++            case 4 : return "> 16:9";
++            default: return "";
++        }
++    }
++    const char* Mmt_video_frame_rate(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "15";
++            case 2 : return "24/1.001";
++            case 3 : return "24";
++            case 4 : return "25";
++            case 5 : return "30/1.001";
++            case 6 : return "30";
++            case 7 : return "50";
++            case 8 : return "60/1.001";
++            case 9 : return "60";
++            case 10: return "100";
++            case 11: return "120/1.001";
++            case 12: return "120";
++            default: return "";
++        }
++    }
++    const char* Mmt_video_transfer(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "BT.709";
++            case 2 : return "IEC 61966-2-4";
++            case 3 : return "BT.2020";
++            case 4 : return "BT.2100 PQ";
++            case 5 : return "BT.2100 HLG";
++            default: return "";
++        }
++    }
++    const char* Mmt_stream_content(int8u c)
++    {
++        switch (c)
++        {
++            case 2 : return "Sound (system not specified)";
++            case 3 : return "MPEG-4 AAC";
++            case 4 : return "MPEG-4 ALS";
++            default: return "";
++        }
++    }
++    const char* Mmt_audio_mode(int8u c) //component_type bits 4-0 (Table 7-60)
++    {
++        switch (c & 0x1F)
++        {
++            case 0x01: return "1/0 mode (single mono)";
++            case 0x02: return "1/0 + 1/0 mode (dual mono)";
++            case 0x03: return "2/0 mode (stereo)";
++            case 0x04: return "2/1 mode";
++            case 0x05: return "3/0 mode";
++            case 0x06: return "2/2 mode";
++            case 0x07: return "3/1 mode";
++            case 0x08: return "3/2 mode";
++            case 0x09: return "3/2 + LFE mode (3/2.1 mode)";
++            case 0x0A: return "3/3.1 mode";
++            case 0x0B: return "2/0/0-2/0/2-0.1 mode";
++            case 0x0C: return "5/2.1 mode";
++            case 0x0D: return "3/2/2.1 mode";
++            case 0x0E: return "2/0/0-3/0/2-0.1 mode";
++            case 0x0F: return "0/2/0-3/0/2-0.1 mode";
++            case 0x10: return "2/0/0-3/2/3-0.2 mode";
++            case 0x11: return "3/3/3-5/2/3-3/0/0.2 mode";
++            default  : return "";
++        }
++    }
++    const char* Mmt_sampling_rate(int8u c)
++    {
++        switch (c)
++        {
++            case 1 : return "16 kHz";
++            case 2 : return "22.05 kHz";
++            case 3 : return "24 kHz";
++            case 5 : return "32 kHz";
++            case 6 : return "44.1 kHz";
++            case 7 : return "48 kHz";
++            default: return "";
++        }
++    }
++    const char* Mmt_data_component_id(int16u c)
++    {
++        switch (c)
++        {
++            case 0x0020: return "Caption (2nd generation)";
++            case 0x0021: return "Multimedia (2nd generation)";
++            default    : return "";
++        }
++    }
++    const char* Mmt_service_type(int8u c)
++    {
++        switch (c)
++        {
++            case 0x01: return "Digital TV service";
++            case 0x02: return "Digital audio service";
++            case 0xA1: return "Special video service";
++            case 0xA4: return "Engineering service";
++            case 0xC0: return "Data service";
++            case 0xC1: return "Storage type service using TLV";
++            case 0xC2: return "Multimedia service";
++            default  : return "";
 +        }
 +    }
 +}
@@ -2806,11 +2949,11 @@ index 0000000..d9b1907
 +    }
 +    int8u video_resolution, video_aspect_ratio, video_scan_flag, video_frame_rate;
 +    BS_Begin();
-+    Get_S1 (4, video_resolution,                                "video_resolution");
-+    Get_S1 (4, video_aspect_ratio,                              "video_aspect_ratio");
-+    Get_S1 (1, video_scan_flag,                                 "video_scan_flag");
++    Get_S1 (4, video_resolution,                                "video_resolution");   Param_Info1(Mmt_video_resolution(video_resolution));
++    Get_S1 (4, video_aspect_ratio,                              "video_aspect_ratio"); Param_Info1(Mmt_video_aspect_ratio(video_aspect_ratio));
++    Get_S1 (1, video_scan_flag,                                 "video_scan_flag");    Param_Info1(video_scan_flag ? "Progressive" : "Interlaced");
 +    Skip_S1(2,                                                  "reserved");
-+    Get_S1 (5, video_frame_rate,                                "video_frame_rate");
++    Get_S1 (5, video_frame_rate,                                "video_frame_rate");   Param_Info1(Mmt_video_frame_rate(video_frame_rate));
 +    BS_End();
 +    CurrentAsset->VideoResolution = video_resolution;
 +    CurrentAsset->VideoAspect     = video_aspect_ratio;
@@ -2821,7 +2964,7 @@ index 0000000..d9b1907
 +        int8u transfer;
 +        Skip_B2(                                                "component_tag");
 +        BS_Begin();
-+        Get_S1 (4, transfer,                                    "video_transfer_characteristics");
++        Get_S1 (4, transfer,                                    "video_transfer_characteristics"); Param_Info1(Mmt_video_transfer(transfer));
 +        Skip_S1(4,                                              "reserved");
 +        BS_End();
 +        if (Complete_Stream && transfer >= 1 && transfer < 8)
@@ -2850,11 +2993,12 @@ index 0000000..d9b1907
 +    }
 +    int8u component_type, sampling_rate;
 +    bool  es_multi, main_component;
++    int8u stream_content;
 +    BS_Begin();
 +    Skip_S1(4,                                                  "reserved_future_use");
-+    Skip_S1(4,                                                  "stream_content");
++    Get_S1 (4, stream_content,                                  "stream_content"); Param_Info1(Mmt_stream_content(stream_content));
 +    BS_End();
-+    Get_B1 (component_type,                                     "component_type");
++    Get_B1 (component_type,                                     "component_type"); Param_Info1(Mmt_audio_mode(component_type));
 +    Skip_B2(                                                    "component_tag");
 +    Skip_B1(                                                    "stream_type");
 +    Skip_B1(                                                    "simulcast_group_tag");
@@ -2862,7 +3006,7 @@ index 0000000..d9b1907
 +    Get_SB (es_multi,                                           "ES_multi_lingual_flag");
 +    Get_SB (main_component,                                     "main_component_flag");
 +    Skip_S1(2,                                                  "quality_indicator");
-+    Get_S1 (3, sampling_rate,                                   "sampling_rate");
++    Get_S1 (3, sampling_rate,                                   "sampling_rate"); Param_Info1(Mmt_sampling_rate(sampling_rate));
 +    Skip_SB(                                                    "reserved_future_use");
 +    BS_End();
 +    CurrentAsset->Handicapped   = (component_type >> 5) & 0x03;
@@ -2891,7 +3035,7 @@ index 0000000..d9b1907
 +    if (Element_Size - Element_Offset >= 8 && CurrentAsset)
 +    {
 +        int16u data_component_id;
-+        Get_B2 (data_component_id,                              "data_component_id");
++        Get_B2 (data_component_id,                              "data_component_id"); Param_Info1(Mmt_data_component_id(data_component_id));
 +        if (data_component_id == 0x0020)
 +        {
 +            Ztring Language;
@@ -2956,8 +3100,8 @@ index 0000000..d9b1907
 +        return;
 +    }
 +    Ztring Provider, ServiceName;
-+    int8u  provider_name_length, service_name_length;
-+    Skip_B1(                                                    "service_type");
++    int8u  service_type, provider_name_length, service_name_length;
++    Get_B1 (service_type,                                       "service_type"); Param_Info1(Mmt_service_type(service_type));
 +    Get_B1 (provider_name_length,                               "provider_name_length");
 +    if (provider_name_length && Element_Offset + provider_name_length <= Element_Size)
 +        Get_UTF8(provider_name_length, Provider,                "service_provider_name");
