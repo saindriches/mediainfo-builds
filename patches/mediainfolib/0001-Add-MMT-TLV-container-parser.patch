@@ -1,4 +1,4 @@
-From 64301c492b72b725bdad9c1d31e0582d0c7d7f63 Mon Sep 17 00:00:00 2001
+From 388782cb44dd7977137422bd93266895a1154cb1 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -24,12 +24,12 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
  Source/MediaInfo/Multiple/File_Mmt.cpp        |  461 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  167 ++
- Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1604 +++++++++++++++++
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1614 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  194 ++
  .../Multiple/File_Mmt_Descriptors.cpp         |  556 ++++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 3064 insertions(+), 1 deletion(-)
+ 10 files changed, 3074 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -760,10 +760,10 @@ index 0000000..3da7bae
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..71ca4b1
+index 0000000..aa2e247
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -0,0 +1,1604 @@
+@@ -0,0 +1,1614 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -919,6 +919,13 @@ index 0000000..71ca4b1
 +    // MH-SDT recurs less often than MPT/EIT, so scan this far past core
 +    // completion to catch it.
 +    const int64u SDT_GRACE_PACKETS              = 20000;
++
++    // A recording that begins at its program start has the present event's start
++    // ~= the first clock, so the boundary window would only settle after ~75 s of
++    // stream (hundreds of MB at 8K). The present event is already captured at core
++    // completion and the tail probe fixes the duration, so cap the settle wait:
++    // finalize this far past core completion even if the window has not passed.
++    const int64u SETTLE_GRACE_PACKETS           = 5000;
 +
 +    const int64s NTP_UNIX_EPOCH_DELTA           = 2208988800LL;
 +
@@ -1573,7 +1580,10 @@ index 0000000..71ca4b1
 +
 +    // Recompute: this packet's EIT/TOT may have set the start or advanced the clock.
 +    Settled = probe_settled();
-+    bool ScanComplete = CoreComplete && Settled
++    bool SettledOrTimeout = Settled
++                         || (Core_Done_At != (int64u)-1
++                          && Packets_Since_Accept - Core_Done_At >= SETTLE_GRACE_PACKETS);
++    bool ScanComplete = CoreComplete && SettledOrTimeout
 +                     && (Sdt_Found
 +                      || (Core_Done_At != (int64u)-1
 +                       && Packets_Since_Accept - Core_Done_At >= SDT_GRACE_PACKETS));

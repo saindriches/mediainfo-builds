@@ -1,4 +1,4 @@
-From c5cb78a032afb04da829aa8b25837280fc14c14d Mon Sep 17 00:00:00 2001
+From 87ac94f9ed42a6a47ab401771df9c902ce9df69c Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:16:03 +0900
 Subject: [PATCH 2/3] MMT/TLV: register the format in the database
