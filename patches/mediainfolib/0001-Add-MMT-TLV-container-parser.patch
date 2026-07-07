@@ -1,4 +1,4 @@
-From 387b4f98818bab168b9686d8673b14278737a443 Mon Sep 17 00:00:00 2001
+From 0b2c500d77d334cc4781dc604722e59ee7299517 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -22,14 +22,14 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Project/CMake/CMakeLists.txt                  |    3 +
  Source/MediaInfo/File__MultipleParsing.cpp    |    6 +
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
- Source/MediaInfo/Multiple/File_Mmt.cpp        |  411 +++++
+ Source/MediaInfo/Multiple/File_Mmt.cpp        |  420 +++++
  Source/MediaInfo/Multiple/File_Mmt.h          |  146 ++
  Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1608 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
- .../Multiple/File_Mmt_Descriptors.cpp         |  397 ++++
+ .../Multiple/File_Mmt_Descriptors.cpp         |  398 ++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 2837 insertions(+), 1 deletion(-)
+ 10 files changed, 2847 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -120,10 +120,10 @@ index 73507d3..d500403 100644
       || defined(MEDIAINFO_CMML_NO)  || defined(MEDIAINFO_KATE_NO)  || defined(MEDIAINFO_PGS_NO) || defined(MEDIAINFO_OTHERTEXT_NO) \
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.cpp b/Source/MediaInfo/Multiple/File_Mmt.cpp
 new file mode 100644
-index 0000000..fe5cc58
+index 0000000..a3d31df
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.cpp
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,420 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -337,7 +337,16 @@ index 0000000..fe5cc58
 +    if (Element_Size - Element_Offset < 2) return;
 +    Get_B2 (mpt_desc_len,                                       "MPT_descriptors_length");
 +    if (Element_Offset + mpt_desc_len > Element_Size) return;
-+    Skip_XX(mpt_desc_len,                                       "MPT_descriptors");
++    if (mpt_desc_len)
++    {
++        //Package-level descriptors: not extracted, but named in the trace.
++        File_Mmt_Descriptors Desc;
++        Desc.Complete_Stream = Complete_Stream;
++        Open_Buffer_Init(&Desc);
++        Open_Buffer_Continue(&Desc, Buffer + Buffer_Offset + (size_t)Element_Offset, mpt_desc_len);
++        Open_Buffer_Finalize(&Desc);
++        Skip_XX(mpt_desc_len,                                   "MPT_descriptors");
++    }
 +    if (Element_Size - Element_Offset < 1) return;
 +    Get_B1 (number_of_assets,                                   "number_of_assets");
 +
@@ -537,7 +546,7 @@ index 0000000..fe5cc58
 +#endif //MEDIAINFO_MMTTLV_YES
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.h b/Source/MediaInfo/Multiple/File_Mmt.h
 new file mode 100644
-index 0000000..4d27359
+index 0000000..09b3970
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.h
 @@ -0,0 +1,146 @@
@@ -583,7 +592,7 @@ index 0000000..4d27359
 +    int8u  Handicapped;   //audio_for_handicapped: 0b01 = VI commentary
 +    int8u  AudioMode;     //component_type & 0x1F (0=none)
 +    int8u  SamplingCode;  //sampling_rate 3-bit code (0=none)
-+    //MH-video-component descriptor (0x8010):
++    //Video_Component_Descriptor (0x8010):
 +    int8u  VideoResolution; //0=none, 6=2160, 7=4320
 +    int8u  VideoAspect;
 +    int8u  VideoScan;       //0=interlaced, 1=progressive, 0xFF=none
@@ -689,7 +698,7 @@ index 0000000..4d27359
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..545712c
+index 0000000..d69b16f
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 @@ -0,0 +1,1608 @@
@@ -881,7 +890,7 @@ index 0000000..545712c
 +
 +    inline int bcd2(int8u b) { return (b >> 4) * 10 + (b & 0x0F); }
 +
-+    // MH-video-component geometry (STD-B60).
++    // Video_Component_Descriptor geometry (0x8010, STD-B60).
 +    inline int VideoResolutionHeight(int8u code)
 +    {
 +        switch (code)
@@ -2502,10 +2511,10 @@ index 0000000..4d54d5a
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
 new file mode 100644
-index 0000000..2453576
+index 0000000..539f703
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,398 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -2536,7 +2545,8 @@ index 0000000..2453576
 +{
 +
 +//***************************************************************************
-+// Descriptor tag -> name (ARIB STD-B60 Table 4-10); "" if unrecognized.
++// Descriptor tag -> name, using the exact B60 syntax-structure identifiers
++// (STD-B60 Table 4-10 and the descriptor bodies); "" if unrecognized.
 +//***************************************************************************
 +
 +namespace
@@ -2545,77 +2555,77 @@ index 0000000..2453576
 +    {
 +        switch (tag)
 +        {
-+            case 0x0000 : return "CRI_descriptor";
-+            case 0x0001 : return "MPU_timestamp_descriptor";
-+            case 0x0002 : return "Dependency_relationship_descriptor";
-+            case 0x0003 : return "GFDT_descriptor";
-+            case 0x8000 : return "Asset_group_descriptor";
-+            case 0x8001 : return "Event_package_descriptor";
-+            case 0x8002 : return "Background_color_designation_descriptor";
-+            case 0x8003 : return "MPU_presentation_area_designation_descriptor";
-+            case 0x8004 : return "Access_control_descriptor";
-+            case 0x8005 : return "Scramble_system_descriptor";
-+            case 0x8006 : return "Message_certification_system_descriptor";
-+            case 0x8007 : return "Emergency_information_descriptor"; // MH
-+            case 0x8008 : return "MH-MPEG4_audio_descriptor";
-+            case 0x8009 : return "MH-MPEG4_audio_extension_descriptor";
-+            case 0x800A : return "MH-HEVC_video_descriptor";
-+            case 0x800C : return "MH-event_group_descriptor";
-+            case 0x800D : return "MH-service_list_descriptor";
-+            case 0x8010 : return "Video_component_descriptor";
-+            case 0x8011 : return "MH-stream_identification_descriptor";
-+            case 0x8012 : return "MH-content_descriptor";
-+            case 0x8013 : return "MH-parental_rating_descriptor";
-+            case 0x8014 : return "MH-audio_component_descriptor";
-+            case 0x8015 : return "MH-object_area_descriptor";
-+            case 0x8016 : return "MH-series_descriptor";
-+            case 0x8017 : return "MH-SI_transmission_parameter_descriptor";
-+            case 0x8018 : return "MH-broadcaster_name_descriptor";
-+            case 0x8019 : return "MH-service_descriptor";
-+            case 0x801A : return "IP_data_flow_descriptor";
-+            case 0x801B : return "MH-CA_startup_descriptor";
-+            case 0x801C : return "MH-type_descriptor";
-+            case 0x801D : return "MH-info_descriptor";
-+            case 0x801E : return "MH-expire_descriptor";
-+            case 0x801F : return "MH-compression_type_descriptor";
-+            case 0x8020 : return "MH-data_component_descriptor";
-+            case 0x8021 : return "UTC_NPT_reference_descriptor";
-+            case 0x8023 : return "MH-local_time_offset_descriptor";
-+            case 0x8024 : return "MH-component_group_descriptor";
-+            case 0x8025 : return "MH-logo_transmission_descriptor";
-+            case 0x8026 : return "MPU_extended_timestamp_descriptor";
-+            case 0x8027 : return "MPU_download_content_descriptor";
-+            case 0x8028 : return "MH-network_download_content_descriptor";
-+            case 0x8029 : return "MH-application_descriptor";
-+            case 0x802A : return "MH-transmission_protocol_descriptor";
-+            case 0x802B : return "MH-simple_application_location_descriptor";
-+            case 0x802C : return "MH-application_boundary_authority_setting_descriptor";
-+            case 0x802D : return "MH-starting_priority_information_descriptor";
-+            case 0x802E : return "MH-cache_information_descriptor";
-+            case 0x802F : return "MH-probabilistic_application_delay_descriptor";
-+            case 0x8030 : return "Link_destination_PU_descriptor";
-+            case 0x8031 : return "Lock_cache_designation_descriptor";
-+            case 0x8032 : return "Unlock_cache_designation_descriptor";
-+            case 0x8033 : return "MH-download_protection_descriptor";
-+            case 0x8034 : return "Application_service_descriptor";
-+            case 0x8035 : return "MPU_node_descriptor";
-+            case 0x8036 : return "PU_configuration_descriptor";
-+            case 0x8037 : return "MH-layered_coding_descriptor";
-+            case 0x8038 : return "Content_copy_control_descriptor";
-+            case 0x8039 : return "Content_usage_control_descriptor";
-+            case 0x803A : return "MH-external_application_control_descriptor";
-+            case 0x803B : return "MH-video_recording_reproduction_application_descriptor";
-+            case 0x803C : return "MH-simple_video_recording_reproduction_application_location_descriptor";
-+            case 0x803D : return "MH-application_valid_term_descriptor";
-+            case 0x803E : return "Related_broadcaster_descriptor";
-+            case 0x803F : return "Multimedia_service_information_descriptor";
-+            case 0x8040 : return "Emergency_news_descriptor";
-+            case 0x8041 : return "MH-CA_contract_information_descriptor";
-+            case 0x8042 : return "MH-CA_service_descriptor";
-+            case 0xF000 : return "MH-link_descriptor";
-+            case 0xF001 : return "MH-short_event_descriptor";
-+            case 0xF002 : return "MH-extended_event_descriptor";
-+            case 0xF003 : return "Event_message_descriptor";
++            case 0x0000 : return "CRI_Descriptor";
++            case 0x0001 : return "MPU_Timestamp_Descriptor";
++            case 0x0002 : return "Dependency_Descriptor";
++            case 0x0003 : return "GFDT_Descriptor";
++            case 0x8000 : return "Asset_Group_Descriptor";
++            case 0x8001 : return "Event_Package_Descriptor";
++            case 0x8002 : return "Background_Color_Descriptor";
++            case 0x8003 : return "MPU_Presentation_Region_Descriptor";
++            case 0x8004 : return "Access_Control_Descriptor";
++            case 0x8005 : return "Scrambler_Descriptor";
++            case 0x8006 : return "Message_Authentication_Method_Descriptor";
++            case 0x8007 : return "Emergency_Information_Descriptor";
++            case 0x8008 : return "MH-MPEG-4_Audio_Descriptor";
++            case 0x8009 : return "MH-MPEG-4_Audio_Extension_Descriptor";
++            case 0x800A : return "MH-HEVC_Descriptor";
++            case 0x800C : return "MH-Event_Group_Descriptor";
++            case 0x800D : return "MH-Service_List_Descriptor";
++            case 0x8010 : return "Video_Component_Descriptor";
++            case 0x8011 : return "MH-Stream_Identifier_Descriptor";
++            case 0x8012 : return "MH-Content_Descriptor";
++            case 0x8013 : return "MH-Parental_Rating_Descriptor";
++            case 0x8014 : return "MH-Audio_Component_Descriptor";
++            case 0x8015 : return "MH-Target_Region_Descriptor";
++            case 0x8016 : return "MH-Series_Descriptor";
++            case 0x8017 : return "MH-SI_Parameter_Descriptor";
++            case 0x8018 : return "MH-Broadcaster_Name_Descriptor";
++            case 0x8019 : return "MH-Service_Descriptor";
++            case 0x801A : return "IP_Data_Flow_Descriptor";
++            case 0x801B : return "MH-CA_Startup_Descriptor";
++            case 0x801C : return "MH-Type_Descriptor";
++            case 0x801D : return "MH-Info_Descriptor";
++            case 0x801E : return "MH-Expire_Descriptor";
++            case 0x801F : return "MH-Compression_Type_Descriptor";
++            case 0x8020 : return "MH-Data_Component_Descriptor";
++            case 0x8021 : return "UTC-NPT_Reference_Descriptor";
++            case 0x8023 : return "MH-Local_Time_Offset_Descriptor";
++            case 0x8024 : return "MH-Component_Group_Descriptor";
++            case 0x8025 : return "MH-Logo_Transmission_Descriptor";
++            case 0x8026 : return "MPU_Extended_Timestamp_Descriptor";
++            case 0x8027 : return "MPU_Download_Content_Descriptor";
++            case 0x8028 : return "MH-Network_Download_Content_Descriptor";
++            case 0x8029 : return "MH-Application_Descriptor";
++            case 0x802A : return "MH-Transport_Protocol_Descriptor";
++            case 0x802B : return "MH-Simple_Application_Location_Descriptor";
++            case 0x802C : return "MH-Application_Boundary_and_Permission_Descriptor";
++            case 0x802D : return "MH-Autostart_Priority_Descriptor";
++            case 0x802E : return "MH-Cache_Control_Info_Descriptor";
++            case 0x802F : return "MH-Randomized_Latency_Descriptor";
++            case 0x8030 : return "Linked_PU_Descriptor";
++            case 0x8031 : return "Locked_Cache_Descriptor";
++            case 0x8032 : return "Unlocked_Cache_Descriptor";
++            case 0x8033 : return "MH-DL_Protection_Descriptor";
++            case 0x8034 : return "Application_Service_Descriptor";
++            case 0x8035 : return "MPU_Node_Descriptor";
++            case 0x8036 : return "PU_Structure_Descriptor";
++            case 0x8037 : return "MH-Hierarchy_Descriptor";
++            case 0x8038 : return "Content_Copy_Control_Descriptor";
++            case 0x8039 : return "Content_Usage_Control_Descriptor";
++            case 0x803A : return "MH-External_Application_Control_Descriptor";
++            case 0x803B : return "MH-Playback_Application_Descriptor";
++            case 0x803C : return "MH-Simple_Playback_Application_Location_Descriptor";
++            case 0x803D : return "MH-Application_Expiration_Descriptor";
++            case 0x803E : return "Related_Broadcaster_Descriptor";
++            case 0x803F : return "Multimedia_Service_Info_Descriptor";
++            case 0x8040 : return "Emergency_News_Descriptor";
++            case 0x8041 : return "MH-CA_Contract_Info_Descriptor";
++            case 0x8042 : return "MH-CA_Service_Descriptor";
++            case 0xF000 : return "MH-Linkage_Descriptor";
++            case 0xF001 : return "MH-Short_Event_Descriptor";
++            case 0xF002 : return "MH-Extended_Event_Descriptor";
++            case 0xF003 : return "Event_Message_Descriptor";
 +            case 0xF004 : return "MH-stuffing_descriptor";
 +            case 0xF005 : return "MH-broadcast_id_descriptor";
 +            case 0xF006 : return "MH-network_identification_descriptor";
@@ -2676,13 +2686,13 @@ index 0000000..2453576
 +{
 +    switch (Element_Code)
 +    {
-+        case 0x0001 : Element_Name("MPU_timestamp_descriptor");       Descriptor_0001(); break;
-+        case 0x8000 : Element_Name("Asset_group_descriptor");         Descriptor_8000(); break;
-+        case 0x8010 : Element_Name("Video_component_descriptor");     Descriptor_8010(); break;
-+        case 0x8014 : Element_Name("MH-audio_component_descriptor");  Descriptor_8014(); break;
-+        case 0x8019 : Element_Name("MH-service_descriptor");          Descriptor_8019(); break;
-+        case 0x8020 : Element_Name("MH-data_component_descriptor");   Descriptor_8020(); break;
-+        case 0xF001 : Element_Name("MH-short_event_descriptor");      Descriptor_F001(); break;
++        case 0x0001 : Element_Name("MPU_Timestamp_Descriptor");       Descriptor_0001(); break;
++        case 0x8000 : Element_Name("Asset_Group_Descriptor");         Descriptor_8000(); break;
++        case 0x8010 : Element_Name("Video_Component_Descriptor");     Descriptor_8010(); break;
++        case 0x8014 : Element_Name("MH-Audio_Component_Descriptor");  Descriptor_8014(); break;
++        case 0x8019 : Element_Name("MH-Service_Descriptor");          Descriptor_8019(); break;
++        case 0x8020 : Element_Name("MH-Data_Component_Descriptor");   Descriptor_8020(); break;
++        case 0xF001 : Element_Name("MH-Short_Event_Descriptor");      Descriptor_F001(); break;
 +        default     :
 +            {
 +                const char* Name = Mmt_Descriptor_Name((int16u)Element_Code);
@@ -2905,7 +2915,7 @@ index 0000000..2453576
 +#endif //MEDIAINFO_MMTTLV_YES
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.h b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.h
 new file mode 100644
-index 0000000..65ed9a0
+index 0000000..e4e6f3b
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.h
 @@ -0,0 +1,60 @@
@@ -2957,13 +2967,13 @@ index 0000000..65ed9a0
 +    void Data_Parse() override;
 +
 +    //Descriptors
-+    void Descriptor_0001(); //MPU_timestamp_descriptor: video presentation-time span
-+    void Descriptor_8000(); //Asset_group_descriptor
-+    void Descriptor_8010(); //MH_video_component_descriptor
-+    void Descriptor_8014(); //MH_audio_component_descriptor
-+    void Descriptor_8019(); //MH_service_descriptor: provider + service name
-+    void Descriptor_8020(); //MH_data_component_descriptor: superimpose vs subtitle
-+    void Descriptor_F001(); //MH_short_event_descriptor: event name + text
++    void Descriptor_0001(); //MPU_Timestamp_Descriptor: video presentation-time span
++    void Descriptor_8000(); //Asset_Group_Descriptor
++    void Descriptor_8010(); //Video_Component_Descriptor
++    void Descriptor_8014(); //MH-Audio_Component_Descriptor
++    void Descriptor_8019(); //MH-Service_Descriptor: provider + service name
++    void Descriptor_8020(); //MH-Data_Component_Descriptor: superimpose vs subtitle
++    void Descriptor_F001(); //MH-Short_Event_Descriptor: event name + text
 +};
 +
 +} //NameSpace

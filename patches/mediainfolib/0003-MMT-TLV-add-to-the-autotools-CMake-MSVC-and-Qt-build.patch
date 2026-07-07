@@ -1,4 +1,4 @@
-From 030c06080076ad123543c86be13f85b11cf1c7cb Mon Sep 17 00:00:00 2001
+From c2f299473fe735bf5d560c6dfed2a6c5000403c6 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:16:03 +0900
 Subject: [PATCH 3/3] MMT/TLV: add to the autotools, CMake, MSVC and Qt build
