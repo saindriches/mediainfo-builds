@@ -1,4 +1,4 @@
-From d93bfe8e6aa14ca3e85bc7df03edef34e02f3928 Mon Sep 17 00:00:00 2001
+From 1b5530166ae1246b048a367b718e960d0e0781aa Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -22,14 +22,14 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Project/CMake/CMakeLists.txt                  |    3 +
  Source/MediaInfo/File__MultipleParsing.cpp    |    6 +
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
- Source/MediaInfo/Multiple/File_Mmt.cpp        |  477 +++++
- Source/MediaInfo/Multiple/File_Mmt.h          |  146 ++
- Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1610 +++++++++++++++++
+ Source/MediaInfo/Multiple/File_Mmt.cpp        |  461 +++++
+ Source/MediaInfo/Multiple/File_Mmt.h          |  166 ++
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1595 +++++++++++++++++
  Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
- .../Multiple/File_Mmt_Descriptors.cpp         |  554 ++++++
+ .../Multiple/File_Mmt_Descriptors.cpp         |  553 ++++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 3062 insertions(+), 1 deletion(-)
+ 10 files changed, 3050 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -120,10 +120,10 @@ index 73507d3..d500403 100644
       || defined(MEDIAINFO_CMML_NO)  || defined(MEDIAINFO_KATE_NO)  || defined(MEDIAINFO_PGS_NO) || defined(MEDIAINFO_OTHERTEXT_NO) \
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.cpp b/Source/MediaInfo/Multiple/File_Mmt.cpp
 new file mode 100644
-index 0000000..b44a7c5
+index 0000000..bd999f6
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.cpp
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,461 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -161,8 +161,7 @@ index 0000000..b44a7c5
 +
 +namespace
 +{
-+    const int8u  TABLE_MPT          = 0x20; // MPT: table_id(8) version(8) length(16)
-+    const int64s JST_OFFSET_SECONDS = 9 * 3600;
++    const int8u TABLE_MPT = 0x20; // MPT: table_id(8) version(8) length(16)
 +
 +    //MMT-SI table_id -> name (ARIB STD-B60 Table 4-8); "" if unrecognized.
 +    const char* Mmt_Table_Name(int8u table_id)
@@ -215,21 +214,6 @@ index 0000000..b44a7c5
 +            case 4 : return "In operation";
 +            default: return "";
 +        }
-+    }
-+
-+    inline int bcd2(int8u b) { return (b >> 4) * 10 + (b & 0x0F); }
-+
-+    //MJD + 24-bit BCD HHMMSS -> seconds since the Unix epoch (still in the
-+    //table's own time zone; the caller removes the JST offset).
-+    inline int64s DateTime_To_Seconds(int16u mjd, int32u bcd_hhmmss)
-+    {
-+        if (mjd == 0 || mjd == 0xFFFF)
-+            return -1;
-+        int64s days = (int64s)mjd - 40587;
-+        int hh = bcd2((int8u)(bcd_hhmmss >> 16));
-+        int mm = bcd2((int8u)(bcd_hhmmss >> 8));
-+        int ss = bcd2((int8u)(bcd_hhmmss));
-+        return days * 86400 + hh * 3600 + mm * 60 + ss;
 +    }
 +}
 +
@@ -343,10 +327,10 @@ index 0000000..b44a7c5
 +    if (Element_Offset < Element_Size)
 +        Skip_XX(Element_Size - Element_Offset,                  "CRC32");
 +
-+    int64s utc = DateTime_To_Seconds(mjd, hms); // JST
++    int64s utc = Mmt_DateTime_To_Seconds(mjd, hms); // JST
 +    if (utc < 0 || !Complete_Stream)
 +        return;
-+    Complete_Stream->TotUtc  = utc - JST_OFFSET_SECONDS;
++    Complete_Stream->TotUtc  = utc - Mmt_JST_Offset_Seconds;
 +    Complete_Stream->TotSeen = true;
 +}
 +
@@ -603,10 +587,10 @@ index 0000000..b44a7c5
 +#endif //MEDIAINFO_MMTTLV_YES
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.h b/Source/MediaInfo/Multiple/File_Mmt.h
 new file mode 100644
-index 0000000..09b3970
+index 0000000..6b5d748
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.h
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,166 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -633,6 +617,26 @@ index 0000000..09b3970
 +
 +namespace MediaInfoLib
 +{
++
++//***************************************************************************
++// Shared time helpers (used by both the container and the signaling parser).
++//***************************************************************************
++const int64s Mmt_JST_Offset_Seconds = 9 * 3600;
++
++inline int Mmt_Bcd2(int8u b) { return (b >> 4) * 10 + (b & 0x0F); }
++
++//MJD + 24-bit BCD HHMMSS -> seconds since the Unix epoch (in the table's own
++//time zone; the caller removes the JST offset).
++inline int64s Mmt_DateTime_To_Seconds(int16u mjd, int32u bcd_hhmmss)
++{
++    if (mjd == 0 || mjd == 0xFFFF)
++        return -1;
++    int64s days = (int64s)mjd - 40587;
++    int hh = Mmt_Bcd2((int8u)(bcd_hhmmss >> 16));
++    int mm = Mmt_Bcd2((int8u)(bcd_hhmmss >> 8));
++    int ss = Mmt_Bcd2((int8u)(bcd_hhmmss));
++    return days * 86400 + hh * 3600 + mm * 60 + ss;
++}
 +
 +//***************************************************************************
 +// One media/data asset from the MPT asset list, with its decoded descriptors.
@@ -755,10 +759,10 @@ index 0000000..09b3970
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..1063310
+index 0000000..85d3e0b
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -0,0 +1,1610 @@
+@@ -0,0 +1,1595 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -916,7 +920,6 @@ index 0000000..1063310
 +    const int64u SDT_GRACE_PACKETS              = 20000;
 +
 +    const int64s NTP_UNIX_EPOCH_DELTA           = 2208988800LL;
-+    const int64s JST_OFFSET_SECONDS             = 9 * 3600;
 +
 +    // Bounds checked by caller.
 +    inline int16u RB16(const int8u* p) { return ((int16u)p[0] << 8) | p[1]; }
@@ -944,8 +947,6 @@ index 0000000..1063310
 +            || t == TLV_HEADER_COMPRESSED_IP_PACKET
 +            || t == TLV_TRANSMISSION_CONTROL_PACKET || t == TLV_NULL_PACKET;
 +    }
-+
-+    inline int bcd2(int8u b) { return (b >> 4) * 10 + (b & 0x0F); }
 +
 +    // Video_Component_Descriptor geometry (0x8010, STD-B60).
 +    inline int VideoResolutionHeight(int8u code)
@@ -1005,18 +1006,6 @@ index 0000000..1063310
 +        }
 +    }
 +
-+    // 16-bit MJD + 24-bit BCD HHMMSS -> JST seconds since the Unix epoch, so
-+    // start/end/now compare directly. -1 on an invalid date.
-+    inline int64s DateTime_To_Seconds(int16u mjd, int32u bcd_hhmmss)
-+    {
-+        if (mjd == 0 || mjd == 0xFFFF)
-+            return -1;
-+        int64s days = (int64s)mjd - 40587;
-+        int hh = bcd2((int8u)(bcd_hhmmss >> 16));
-+        int mm = bcd2((int8u)(bcd_hhmmss >> 8));
-+        int ss = bcd2((int8u)(bcd_hhmmss));
-+        return days * 86400 + hh * 3600 + mm * 60 + ss;
-+    }
 +}
 +
 +//***************************************************************************
@@ -1258,10 +1247,10 @@ index 0000000..1063310
 +        if (Sdt_Found && !Sdt_ServiceName.empty())
 +            Fill(Stream_Menu, StreamPos_Last, Menu_ServiceName, Sdt_ServiceName);
 +
-+        int64s Start = DateTime_To_Seconds(Eit_StartDate, Eit_StartTime); // JST
++        int64s Start = Mmt_DateTime_To_Seconds(Eit_StartDate, Eit_StartTime); // JST
 +        if (Start >= 0)
 +        {
-+            Ztring Time = Ztring().Date_From_Seconds_1970(Start - JST_OFFSET_SECONDS);
++            Ztring Time = Ztring().Date_From_Seconds_1970(Start - Mmt_JST_Offset_Seconds);
 +            Time.FindAndReplace(__T("UTC "), __T(""));
 +            Time += __T(" UTC");
 +            Ztring Dur; Dur.From_UTF8(Time_BCD(Eit_Duration).c_str());
@@ -2181,14 +2170,14 @@ index 0000000..1063310
 +            bool hopped = false;
 +            if (Now_Utc >= 0)
 +            {
-+                int64s start_s = DateTime_To_Seconds(Stream.EitStartDate, Stream.EitStartTime); // JST
++                int64s start_s = Mmt_DateTime_To_Seconds(Stream.EitStartDate, Stream.EitStartTime); // JST
 +                if (start_s >= 0)
 +                {
-+                    start_s -= JST_OFFSET_SECONDS; // -> UTC, to compare with Now_Utc
++                    start_s -= Mmt_JST_Offset_Seconds; // -> UTC, to compare with Now_Utc
 +                    Eit_Start_Utc = start_s;
-+                    int dur_h = bcd2((int8u)(Stream.EitDuration >> 16));
-+                    int dur_m = bcd2((int8u)(Stream.EitDuration >> 8));
-+                    int dur_s = bcd2((int8u)(Stream.EitDuration));
++                    int dur_h = Mmt_Bcd2((int8u)(Stream.EitDuration >> 16));
++                    int dur_m = Mmt_Bcd2((int8u)(Stream.EitDuration >> 8));
++                    int dur_s = Mmt_Bcd2((int8u)(Stream.EitDuration));
 +                    int64s dur   = dur_h * 3600 + dur_m * 60 + dur_s;
 +                    int64s end_s = start_s + dur;
 +                    if (dur > 0 && end_s <= Now_Utc + BOUNDARY_GUARD_SECONDS
@@ -2570,10 +2559,10 @@ index 0000000..4d54d5a
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
 new file mode 100644
-index 0000000..8980ed3
+index 0000000..49c202c
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,553 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -3105,8 +3094,7 @@ index 0000000..8980ed3
 +    Get_B1 (provider_name_length,                               "provider_name_length");
 +    if (provider_name_length && Element_Offset + provider_name_length <= Element_Size)
 +        Get_UTF8(provider_name_length, Provider,                "service_provider_name");
-+    else if (provider_name_length)
-+        provider_name_length = 0; // malformed length; leave the rest to the trailing skip
++    //A malformed provider length leaves the rest to the trailing skip.
 +    if (Element_Offset < Element_Size)
 +    {
 +        Get_B1 (service_name_length,                            "service_name_length");
