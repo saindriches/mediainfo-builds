@@ -1,0 +1,42 @@
+From dddea3c9dab68468f2a514a1865c857d518f1007 Mon Sep 17 00:00:00 2001
+From: Rainbaby <rainbaby@outlook.jp>
+Date: Tue, 7 Jul 2026 22:16:03 +0900
+Subject: [PATCH 2/3] MMT/TLV: register the format in the database
+
+Adds the MMT/TLV row (category Multiple, extension mmts, description) to
+Format.csv and the generated MediaInfo_Config_Automatic.cpp, so the format info
+and extensions come from the database rather than being filled by the parser.
+
+Signed-off-by: Rainbaby <rainbaby@outlook.jp>
+---
+ Source/MediaInfo/MediaInfo_Config_Automatic.cpp | 1 +
+ Source/Resource/Text/DataBase/Format.csv        | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/Source/MediaInfo/MediaInfo_Config_Automatic.cpp b/Source/MediaInfo/MediaInfo_Config_Automatic.cpp
+index f713d62..946a6fc 100644
+--- a/Source/MediaInfo/MediaInfo_Config_Automatic.cpp
++++ b/Source/MediaInfo/MediaInfo_Config_Automatic.cpp
+@@ -1418,6 +1418,7 @@ void MediaInfo_Config_Format (InfoMap &Info)
+     "IVF;;;M;Ivf;;ivf\n"
+     "LXF;;;M;Lxf;;lxf;video/lxf\n"
+     "Matroska;;;M;Mk;;mkv mk3d mka mks;;https://matroska.org/downloads/windows.html\n"
++    "MMT/TLV;;;M;MmtTlv;MMT (MPEG Media Transport) over TLV, ARIB STD-B32/B60;mmts\n"
+     "MPEG-PS;;;M;MpegPs;;mpeg mpg m2p vob vro pss evo;video/MP2P\n"
+     "MPEG-TS;;;M;MpegTs;;ts m2t m2s m4t m4s tmf ts tp trp ty;video/MP2T\n"
+     "MPEG-4;;;M;Mpeg4;;braw mov mp4 m4v m4a m4b m4p m4r 3ga 3gpa 3gpp 3gp 3gpp2 3g2 k3g jpm jpx mqv ismv isma ismt f4a f4b f4v;video/mp4\n"
+diff --git a/Source/Resource/Text/DataBase/Format.csv b/Source/Resource/Text/DataBase/Format.csv
+index 41e383e..25d02d0 100644
+--- a/Source/Resource/Text/DataBase/Format.csv
++++ b/Source/Resource/Text/DataBase/Format.csv
+@@ -25,6 +25,7 @@ ISM;Internet Streaming Media;;M;Ism;;ism;;;
+ IVF;;;M;Ivf;;ivf;;;
+ LXF;;;M;Lxf;;lxf;video/lxf;;
+ Matroska;;;M;Mk;;mkv mk3d mka mks;;https://matroska.org/downloads/windows.html;
++MMT/TLV;;;M;MmtTlv;MMT (MPEG Media Transport) over TLV, ARIB STD-B32/B60;mmts;;;
+ MPEG-PS;;;M;MpegPs;;mpeg mpg m2p vob vro pss evo;video/MP2P;;
+ MPEG-TS;;;M;MpegTs;;ts m2t m2s m4t m4s tmf ts tp trp ty;video/MP2T;;
+ MPEG-4;;;M;Mpeg4;;braw mov mp4 m4v m4a m4b m4p m4r 3ga 3gpa 3gpp 3gp 3gpp2 3g2 k3g jpm jpx mqv ismv isma ismt f4a f4b f4v;video/mp4;;
+-- 
+2.50.1 (Apple Git-155)
+
