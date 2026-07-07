@@ -1,4 +1,4 @@
-From 1b5530166ae1246b048a367b718e960d0e0781aa Mon Sep 17 00:00:00 2001
+From f2b9ce9b92745e8956cef4bc68dd5466b4d0f486 Mon Sep 17 00:00:00 2001
 From: Rainbaby <rainbaby@outlook.jp>
 Date: Tue, 7 Jul 2026 22:15:43 +0900
 Subject: [PATCH 1/3] Add MMT/TLV container parser
@@ -23,13 +23,13 @@ Signed-off-by: Rainbaby <rainbaby@outlook.jp>
  Source/MediaInfo/File__MultipleParsing.cpp    |    6 +
  Source/MediaInfo/MediaInfo_File.cpp           |   11 +-
  Source/MediaInfo/Multiple/File_Mmt.cpp        |  461 +++++
- Source/MediaInfo/Multiple/File_Mmt.h          |  166 ++
- Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1595 +++++++++++++++++
- Source/MediaInfo/Multiple/File_MmtTlv.h       |  193 ++
- .../Multiple/File_Mmt_Descriptors.cpp         |  553 ++++++
+ Source/MediaInfo/Multiple/File_Mmt.h          |  167 ++
+ Source/MediaInfo/Multiple/File_MmtTlv.cpp     | 1598 +++++++++++++++++
+ Source/MediaInfo/Multiple/File_MmtTlv.h       |  194 ++
+ .../Multiple/File_Mmt_Descriptors.cpp         |  556 ++++++
  .../MediaInfo/Multiple/File_Mmt_Descriptors.h |   60 +
  Source/MediaInfo/Setup.h                      |    3 +
- 10 files changed, 3050 insertions(+), 1 deletion(-)
+ 10 files changed, 3058 insertions(+), 1 deletion(-)
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.cpp
  create mode 100644 Source/MediaInfo/Multiple/File_Mmt.h
  create mode 100644 Source/MediaInfo/Multiple/File_MmtTlv.cpp
@@ -587,10 +587,10 @@ index 0000000..bd999f6
 +#endif //MEDIAINFO_MMTTLV_YES
 diff --git a/Source/MediaInfo/Multiple/File_Mmt.h b/Source/MediaInfo/Multiple/File_Mmt.h
 new file mode 100644
-index 0000000..6b5d748
+index 0000000..3da7bae
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,167 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -689,6 +689,7 @@ index 0000000..6b5d748
 +    bool   EitServiceIdFound; //in
 +    Ztring ServiceName;       //out
 +    Ztring Provider;          //out
++    Ztring ServiceType;       //out (decoded MH-service_descriptor service_type)
 +    bool   SdtFound;          //out
 +
 +    //MPT: asset list (parsed here, committed by the container), plus the newest
@@ -759,10 +760,10 @@ index 0000000..6b5d748
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.cpp b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
 new file mode 100644
-index 0000000..85d3e0b
+index 0000000..101e375
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.cpp
-@@ -0,0 +1,1595 @@
+@@ -0,0 +1,1598 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -1230,6 +1231,8 @@ index 0000000..85d3e0b
 +        Fill(Stream_General, 0, General_ServiceName, Sdt_ServiceName);
 +        if (!Sdt_Provider.empty())
 +            Fill(Stream_General, 0, General_ServiceProvider, Sdt_Provider);
++        if (!Sdt_ServiceType.empty())
++            Fill(Stream_General, 0, General_ServiceType, Sdt_ServiceType);
 +    }
 +
 +    //Present event -> a Menu chapter, as File_MpegTs renders DVB/ATSC EPG: the
@@ -2250,6 +2253,7 @@ index 0000000..85d3e0b
 +                Sdt_Found       = true;
 +                Sdt_ServiceName = Stream.ServiceName;
 +                Sdt_Provider    = Stream.Provider;
++                Sdt_ServiceType = Stream.ServiceType;
 +            }
 +            if (Stream.TlvStreamId >= 0 && Tlv_Stream_Id < 0)
 +                Tlv_Stream_Id = Stream.TlvStreamId;
@@ -2360,10 +2364,10 @@ index 0000000..85d3e0b
 +#endif //MEDIAINFO_MMTTLV_YES
 diff --git a/Source/MediaInfo/Multiple/File_MmtTlv.h b/Source/MediaInfo/Multiple/File_MmtTlv.h
 new file mode 100644
-index 0000000..4d54d5a
+index 0000000..77b2204
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_MmtTlv.h
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,194 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -2521,6 +2525,7 @@ index 0000000..4d54d5a
 +    bool     Sdt_Found;
 +    Ztring   Sdt_ServiceName;
 +    Ztring   Sdt_Provider;
++    Ztring   Sdt_ServiceType;
 +
 +    //TLV stream id (transport_stream_id analog) from the MH-SDT/MH-EIT header. -1 = not seen.
 +    int32s   Tlv_Stream_Id;
@@ -2559,10 +2564,10 @@ index 0000000..4d54d5a
 +#endif
 diff --git a/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
 new file mode 100644
-index 0000000..49c202c
+index 0000000..fd3a10d
 --- /dev/null
 +++ b/Source/MediaInfo/Multiple/File_Mmt_Descriptors.cpp
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,556 @@
 +/*  Copyright (c) MediaArea.net SARL. All Rights Reserved.
 + *
 + *  Use of this source code is governed by a BSD-style license that can
@@ -3110,6 +3115,9 @@ index 0000000..49c202c
 +            Complete_Stream->Provider = Provider;
 +        if (!ServiceName.empty())
 +            Complete_Stream->ServiceName = ServiceName;
++        const char* Type = Mmt_service_type(service_type);
++        if (Type[0])
++            Complete_Stream->ServiceType = Ztring().From_UTF8(Type);
 +    }
 +}
 +
