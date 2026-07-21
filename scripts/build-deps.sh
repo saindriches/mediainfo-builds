@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build ZenLib and the patched MediaInfoLib in place, the way the official MediaInfo build expects:
+# Build ZenLib and the MMT/TLV MediaInfoLib in place, the way the official MediaInfo build expects:
 # ZenLib/, MediaInfoLib/, MediaInfo/ as siblings, each built with autotools (autoreconf + configure
 # + make) but NOT installed. The CLI and GUI configure scripts find these built libraries through
 # the relative sibling paths (../../../../ZenLib/..., ../../../../MediaInfoLib/...) and link the
 # static .la, so there is no install prefix; the built source trees ARE the artifact.
 #
-# patches/mediainfolib/* are applied to MediaInfoLib before it configures; the MMT/TLV parser
-# (File_MmtTlv) lives there. This is the slow, cacheable half of the build.
+# MediaInfoLib is checked out from the MMT/TLV PR branch (saindriches/MediaInfoLib @ mmt-tlv), so
+# the File_MmtTlv parser is already in-tree — no patching step. This is the slow, cacheable half.
 #
 # macOS universal: set ARCHS="arm64 x86_64" and each dep is built once per arch and lipo'd into a
 # fat .libs/*.a in place, so the CLI/GUI (compiled with both -arch flags) link a universal library.
@@ -26,15 +26,6 @@ if [ -f "$SRC/MediaInfoLib/Project/GNU/Library/libmediainfo.la" ]; then
 fi
 
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
-
-# Apply our MMT/TLV patches to MediaInfoLib once, before any configure.
-pushd "$SRC/MediaInfoLib"
-  shopt -s nullglob
-  for p in "$ROOT"/patches/mediainfolib/*.patch; do
-    echo "mediainfo-builds: applying $(basename "$p")"
-    patch -p1 -F3 < "$p"
-  done
-popd
 
 # build_lib <dir-under-SRC/Project/GNU/Library> <lib basename, e.g. libzen>
 # Configures + builds static. With ARCHS set, builds each arch, stashes its .a OUTSIDE the build
@@ -75,4 +66,4 @@ build_lib() {
 build_lib ZenLib libzen
 build_lib MediaInfoLib libmediainfo
 
-echo "mediainfo-builds: ZenLib + patched MediaInfoLib built in place (archs: ${ARCHS:-native})"
+echo "mediainfo-builds: ZenLib + MediaInfoLib (mmt-tlv) built in place (archs: ${ARCHS:-native})"

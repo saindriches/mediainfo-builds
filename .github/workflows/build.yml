@@ -1,18 +1,19 @@
 name: build
 
 # Builds MediaInfo (the mediainfo CLI everywhere, plus a MediaInfo.app wxWidgets GUI on macOS) from
-# its three official source repos (ZenLib, MediaInfoLib, MediaInfo) with patches/mediainfolib/*.patch
-# applied to MediaInfoLib. Those patches add the File_MmtTlv MMT/TLV parser, so mediainfo reports
-# assets, codecs, EIT, service, audio, and scramble state from ISDB-S3 4K/8K .mmts files.
+# ZenLib + MediaInfo (MediaArea) and MediaInfoLib checked out from the MMT/TLV PR branch
+# (saindriches/MediaInfoLib @ mmt-tlv, PR #2647). That branch carries the File_MmtTlv MMT/TLV
+# parser in-tree, so mediainfo reports assets, codecs, EIT, service, audio, and scramble state
+# from ISDB-S3 4K/8K .mmts files. (No patch step: the branch is the source of truth.)
 #
-#   macOS   : one universal2 (arm64 + x86_64) build on Apple Silicon, so a single mediainfo and one
-#             MediaInfo.app run on both architectures. No fragile Intel runner.
-#   Linux   : native x86_64 CLI (autotools).
-#   Windows : x64 CLI via the official CMake path (MSVC), FetchContent pulls ZenLib + zlib.
+#   macOS   : one universal2 (arm64 + x86_64) build on Apple Silicon - CLI + MediaInfo.app (wx GUI),
+#             both running on either architecture. No fragile Intel runner.
+#   Linux   : native x86_64 CLI (autotools) + a portable GUI AppImage (wxGTK3, static wx).
+#   Windows : x64 CLI via the official CMake path (MSVC); GUI via the MSVC solution (static wx).
 #
 # Caching, so iterating is cheap:
-#   1. Built ZenLib + patched MediaInfoLib (in place), keyed on the patch set + pinned refs + archs.
-#   2. Static universal wxWidgets prefix (macOS GUI), keyed on the wx version.
+#   1. Built ZenLib + MediaInfoLib (in place), keyed on the pinned refs (incl. mmt-tlv commit) + archs.
+#   2. Static wxWidgets prefix for the GUI (universal on macOS, GTK3 on Linux), keyed on wx version.
 #   3. ccache for recompiles.
 #
 # On an all-build-jobs-success run the release job publishes the artifacts to a GitHub Release.
@@ -20,7 +21,7 @@ name: build
 on:
   push:
     branches: [main]
-    paths: ['patches/**', 'scripts/**', '.github/workflows/build.yml', 'manifest.env']
+    paths: ['scripts/**', '.github/workflows/build.yml', 'manifest.env']
   workflow_dispatch:
     inputs:
       force_rebuild_deps:
@@ -37,10 +38,16 @@ concurrency:
 
 env:
   ZENLIB_REF: "v0.4.41"
-  MEDIAINFOLIB_REF: "dd11d7971107e1b554e41ed446387d22cb3198e9"
+  # Windows GUI (MSVC) needs a ZenLib whose .vcxproj sets ControlFlowGuard + GuardEHContMetadata to
+  # match MediaInfo 26.05; the v0.4.41 tag predates that (LNK2047/LNK1386). master has it. autotools
+  # (macOS/Linux) ignores this, so they stay on the v0.4.41 tag above.
+  ZENLIB_WIN_REF: "2ddc277fe7ecfcbfe45616bb9cd9e23079113ecd"
+  MEDIAINFOLIB_REPO: "saindriches/MediaInfoLib"
+  MEDIAINFOLIB_REF: "e62f133dea1e01b5f9e0a09afafa6e684d2bcc77"
   MEDIAINFO_REF: "d327f8fe76208f0b70bc08e4b55dca508991500d"
   MEDIAINFO_VERSION: "26.05"
   WX_VERSION: "3.2.6"
+  WX_WIN_VERSION: "3.1.7"
   MACOS_ARCHS: "arm64 x86_64"
   CACHE_EPOCH: "4"
 
@@ -62,7 +69,7 @@ jobs:
         with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_REF }}", path: ZenLib }
       - name: Checkout MediaInfoLib
         uses: actions/checkout@v4
-        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
+        with: { repository: "${{ env.MEDIAINFOLIB_REPO }}", ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
       - name: Checkout MediaInfo
         uses: actions/checkout@v4
         with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
@@ -70,7 +77,6 @@ jobs:
       - name: Compute cache hashes
         id: keys
         run: |
-          echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "wx_hash=$(shasum -a 256 scripts/build-wx-macos.sh | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore built deps (ZenLib + MediaInfoLib)
@@ -81,7 +87,7 @@ jobs:
           path: |
             ZenLib
             MediaInfoLib
-          key: deps-macos-uni-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+          key: deps-macos-uni-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-epoch${{ env.CACHE_EPOCH }}
 
       - name: Restore wxWidgets prefix
         id: wxcache
@@ -104,7 +110,7 @@ jobs:
         if: ${{ steps.wxcache.outputs.cache-hit != 'true' }}
         run: ./scripts/build-wx-macos.sh
 
-      - name: Build ZenLib + patched MediaInfoLib (universal)
+      - name: Build ZenLib + MediaInfoLib mmt-tlv (universal)
         if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
         env: { CC: "ccache clang", CXX: "ccache clang++", ARCHS: "${{ env.MACOS_ARCHS }}" }
         run: ./scripts/build-deps.sh
@@ -169,6 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      WX_PREFIX: ${{ github.workspace }}/wxprefix
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ZenLib
@@ -176,14 +183,21 @@ jobs:
         with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_REF }}", path: ZenLib }
       - name: Checkout MediaInfoLib
         uses: actions/checkout@v4
-        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
+        with: { repository: "${{ env.MEDIAINFOLIB_REPO }}", ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
       - name: Checkout MediaInfo
         uses: actions/checkout@v4
         with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
 
-      - name: Compute patch hash
+      - name: Compute wx hash
         id: keys
-        run: echo "patch_hash=$(find patches/mediainfolib -name '*.patch' | sort | xargs cat | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        run: echo "wx_hash=$(sha256sum scripts/build-wx-linux.sh | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore wxWidgets prefix (GTK3, static)
+        id: wxcache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WX_PREFIX }}
+          key: wx-linux-gtk3-${{ env.WX_VERSION }}-${{ steps.keys.outputs.wx_hash }}-epoch${{ env.CACHE_EPOCH }}
 
       - name: Restore built deps
         id: depcache
@@ -193,7 +207,7 @@ jobs:
           path: |
             ZenLib
             MediaInfoLib
-          key: deps-linux-x86_64-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-patch${{ steps.keys.outputs.patch_hash }}-epoch${{ env.CACHE_EPOCH }}
+          key: deps-linux-x86_64-zen${{ env.ZENLIB_REF }}-mil${{ env.MEDIAINFOLIB_REF }}-epoch${{ env.CACHE_EPOCH }}
 
       - uses: actions/cache@v4
         with:
@@ -205,9 +219,14 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            ccache autoconf automake libtool pkg-config build-essential git zlib1g-dev
+            ccache autoconf automake libtool pkg-config build-essential git zlib1g-dev \
+            libgtk-3-dev file patchelf desktop-file-utils librsvg2-bin imagemagick
 
-      - name: Build ZenLib + patched MediaInfoLib
+      - name: Build static wxWidgets (GTK3)
+        if: ${{ steps.wxcache.outputs.cache-hit != 'true' }}
+        run: ./scripts/build-wx-linux.sh
+
+      - name: Build ZenLib + MediaInfoLib mmt-tlv
         if: ${{ steps.depcache.outputs.cache-hit != 'true' }}
         env: { CC: "ccache gcc", CXX: "ccache g++" }
         run: ./scripts/build-deps.sh
@@ -223,23 +242,49 @@ jobs:
           test -x mediainfo || { echo "::error::mediainfo CLI not produced"; exit 1; }
           ./mediainfo --version
 
-      - name: Package
+      - name: Build GUI (static wxWidgets)
+        env: { CC: "ccache gcc", CXX: "ccache g++" }
+        run: |
+          set -euxo pipefail
+          export PATH="$WX_PREFIX/bin:$PATH"
+          cd MediaInfo/Project/GNU/GUI
+          autoreconf -if
+          # --with-wx-static is required: our wx is static-only, so without it configure probes
+          # `wx-config --static=no`, fails to find wx, and falls back to its builtin wx-compile path.
+          ./configure --enable-staticlibs --with-wx-static --with-wx-config="$WX_PREFIX/bin/wx-config"
+          make -j"$(nproc)"
+          test -x mediainfo-gui || { echo "::error::mediainfo-gui not produced"; exit 1; }
+          file mediainfo-gui | grep -q ELF || { echo "::error::mediainfo-gui is not an ELF binary (stale shared-deps cache?)"; exit 1; }
+          ldd mediainfo-gui || true
+
+      - name: Package CLI tarball + GUI AppImage
         run: |
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/out"
           tar cJf "$GITHUB_WORKSPACE/out/mediainfo-cli-linux-x86_64.tar.xz" -C "MediaInfo/Project/GNU/CLI" mediainfo
-          sha256sum "$GITHUB_WORKSPACE"/out/*.tar.xz
+          ./scripts/package-appimage-linux.sh \
+            "MediaInfo/Project/GNU/GUI/mediainfo-gui" \
+            "$GITHUB_WORKSPACE/MediaInfo" "$MEDIAINFO_VERSION" \
+            "$GITHUB_WORKSPACE/out/MediaInfo-gui-linux-x86_64.AppImage"
+          sha256sum "$GITHUB_WORKSPACE"/out/mediainfo-cli-linux-x86_64.tar.xz "$GITHUB_WORKSPACE"/out/*.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
           name: mediainfo-linux-x86_64
-          path: out/mediainfo-cli-linux-x86_64.tar.xz
+          path: |
+            out/mediainfo-cli-linux-x86_64.tar.xz
+            out/MediaInfo-gui-linux-x86_64.AppImage
           if-no-files-found: error
 
-  # ---------------------------------------------------------------- Windows (x64 CLI) ------------
-  # Official CMake path: FetchContent pulls MediaArea/ZenLib + MediaArea/zlib automatically; our
-  # patched MediaInfoLib sits at the sibling path so add_subdirectory compiles our sources. Produces
-  # a static, self-contained mediainfo.exe.
+  # ---------------------------------------------------------------- Windows (x64 CLI + GUI) ------
+  # CLI: official CMake path (Project/CMake/CLI) - FetchContent pulls MediaArea/ZenLib + zlib, the
+  #      mmt-tlv MediaInfoLib compiles in from the sibling path -> static, self-contained mediainfo.exe.
+  # GUI: the MSVC solution (Project/MSVC2022, there is no CMake GUI path). The GUI .vcxproj has
+  #      ProjectReferences to wxWidgets' own wx_base/wx_core/wx_html/wx_wxpng .vcxproj plus
+  #      ZenLib.vcxproj and MediaInfoLib.vcxproj, so a single msbuild of the MediaInfo-GUI target
+  #      builds wxWidgets (from the sibling source) + both libs + the GUI. The .vcxproj hardcodes
+  #      wx 3.1 lib names (wxbase31u.lib, ...), so we check out wxWidgets 3.1.x (WX_WIN_VERSION) as
+  #      the sibling to match without editing upstream. Result: self-contained MediaInfo-GUI.exe.
   windows:
     runs-on: windows-latest
     steps:
@@ -250,19 +295,12 @@ jobs:
         with: { repository: MediaArea/MediaInfo, ref: "${{ env.MEDIAINFO_REF }}", path: MediaInfo }
       - name: Checkout MediaInfoLib
         uses: actions/checkout@v4
-        with: { repository: MediaArea/MediaInfoLib, ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
-
-      - name: Apply MMT/TLV patches to MediaInfoLib
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd MediaInfoLib
-          for p in "$GITHUB_WORKSPACE"/build-repo/patches/mediainfolib/*.patch; do
-            echo "applying $(basename "$p")"; git apply --whitespace=nowarn "$p"
-          done
+        with: { repository: "${{ env.MEDIAINFOLIB_REPO }}", ref: "${{ env.MEDIAINFOLIB_REF }}", path: MediaInfoLib }
 
       - name: Setup MSVC environment
         uses: ./MediaInfo/.github/actions/setup-msvc
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
 
       - name: Configure + build CLI (CMake, static)
         shell: bash
@@ -277,19 +315,78 @@ jobs:
           test -f cmake-prefix/bin/mediainfo.exe || { echo "::error::mediainfo.exe not produced"; exit 1; }
           ./cmake-prefix/bin/mediainfo.exe --version
 
-      - name: Package
+      # ZenLib + wxWidgets are checked out HERE (after the CLI build) on purpose: a sibling ZenLib/
+      # present during the CLI CMake configure makes it use the v0.4.41 tree, whose ancient
+      # cmake_minimum_required is rejected by the runner's CMake 4.x. The CLI uses FetchContent for
+      # ZenLib instead; only the GUI msbuild needs these siblings.
+      - name: Checkout ZenLib (sibling for the GUI msbuild)
+        uses: actions/checkout@v4
+        with: { repository: MediaArea/ZenLib, ref: "${{ env.ZENLIB_WIN_REF }}", path: ZenLib }
+      - name: Checkout wxWidgets (sibling source for the GUI msbuild)
+        uses: actions/checkout@v4
+        with: { repository: wxWidgets/wxWidgets, ref: "v${{ env.WX_WIN_VERSION }}", path: wxWidgets, submodules: recursive }
+
+      - name: Build GUI (MSVC solution, static wxWidgets)
+        # pwsh, not bash: microsoft/setup-msbuild puts msbuild on the PATH for pwsh/cmd, but Git
+        # Bash does not resolve it (the CLI step used cmake/ninja, which are on the default PATH).
+        shell: pwsh
+        run: |
+          # Target only MediaInfo-GUI: msbuild pulls its ProjectReferences (wx_base/wx_core/wx_html/
+          # wx_wxpng from the sibling wxWidgets source, plus ZenLib + the mmt-tlv MediaInfoLib) and
+          # skips the unrelated solution projects (UWP, Qt, shell ext). -restore pulls MediaInfoLib's
+          # zlib NuGet. Output lands in <SolutionDir>/x64/Release per the .vcxproj OutDir.
+          # MediaInfo's GUI .vcxproj links wxpng.lib but omits wxzlib.lib, so wxpng's wx_zlib_*
+          # symbols are unresolved (LNK2019/LNK1120). Add wxzlib.lib to the (Release) link inputs.
+          $vcx = "MediaInfo/Project/MSVC2022/GUI/MediaInfo_GUI.vcxproj"
+          (Get-Content $vcx -Raw) -replace 'wxpng\.lib;comctl32\.lib','wxpng.lib;wxzlib.lib;comctl32.lib' | Set-Content -NoNewline $vcx
+
+          # wxpng depends on wx's bundled zlib, but the GUI's ProjectReferences don't pull it, so
+          # wxzlib.lib is never built (LNK1181). Build it explicitly. wx names bundled libs wx_wx<lib>
+          # (e.g. wx_wxpng.vcxproj), so glob rather than hardcode the exact filename.
+          $zlibproj = Get-ChildItem "wxWidgets/build/msw" -Filter 'wx_*zlib*.vcxproj' | Select-Object -First 1
+          if (-not $zlibproj) { Get-ChildItem "wxWidgets/build/msw" -Filter '*.vcxproj' | ForEach-Object { $_.Name }; throw "wx zlib vcxproj not found" }
+          msbuild $zlibproj.FullName `
+            -p:Configuration=Release -p:Platform=x64 -p:PlatformToolset=v143 -m -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "wx zlib build failed ($LASTEXITCODE)" }
+
+          # ZENLIB_WIN_REF (ZenLib master) matches MediaInfo 26.05's ControlFlowGuard/ehcont settings,
+          # so every module links with consistent guard metadata (no /guard:ehcont mismatch).
+          # -p:PlatformToolset=v143: wxWidgets 3.1.7's bundled MSVC projects target the ancient v100
+          # (VS2010) toolset, which the runner lacks (MSB8020); force the installed v143 for all.
+          msbuild "MediaInfo/Project/MSVC2022/MediaInfo.sln" `
+            -t:MediaInfo-GUI `
+            -p:Configuration=Release -p:Platform=x64 `
+            -p:PlatformToolset=v143 `
+            -restore -p:RestorePackagesConfig=true `
+            -m -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "msbuild MediaInfo-GUI failed ($LASTEXITCODE)" }
+          $exe = Get-ChildItem "MediaInfo/Project/MSVC2022/x64/Release" -Filter *.exe -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) {
+            Get-ChildItem -Recurse "MediaInfo/Project/MSVC2022" -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            throw "GUI exe not produced"
+          }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $exe.FullName out/MediaInfo-GUI.exe
+          Write-Host "built GUI: $($exe.Name)"
+
+      - name: Package (CLI + GUI)
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p out
           cp cmake-prefix/bin/mediainfo.exe out/
           7z a -tzip out/mediainfo-cli-windows-x64.zip ./out/mediainfo.exe >/dev/null
+          # out/MediaInfo-GUI.exe was placed by the pwsh GUI step above.
+          test -f out/MediaInfo-GUI.exe || { echo "::error::out/MediaInfo-GUI.exe missing"; exit 1; }
+          7z a -tzip out/MediaInfo-gui-windows-x64.zip ./out/MediaInfo-GUI.exe >/dev/null
           ls -l out
 
       - uses: actions/upload-artifact@v4
         with:
           name: mediainfo-windows-x64
-          path: out/mediainfo-cli-windows-x64.zip
+          path: |
+            out/mediainfo-cli-windows-x64.zip
+            out/MediaInfo-gui-windows-x64.zip
           if-no-files-found: error
 
   # ---------------------------------------------------------------- Release (gated) --------------
@@ -307,7 +404,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release
-          find artifacts -type f \( -name '*.tar.xz' -o -name '*.zip' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.tar.xz' -o -name '*.zip' -o -name '*.AppImage' \) -exec cp {} release/ \;
           ls -l release
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -315,13 +412,14 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: MediaInfo (MMT/TLV) build ${{ github.run_number }}
           body: |
-            MediaInfo ${{ env.MEDIAINFO_VERSION }} built from source with the File_MmtTlv MMT/TLV
-            patches (patches/mediainfolib/) applied to MediaInfoLib.
+            MediaInfo ${{ env.MEDIAINFO_VERSION }} built from source with MediaInfoLib taken from the
+            MMT/TLV PR branch (${{ env.MEDIAINFOLIB_REPO }} @ mmt-tlv, PR #2647), which provides the
+            File_MmtTlv MMT/TLV parser.
 
-            Artifacts: universal2 macOS CLI + MediaInfo.app (arm64 + x86_64), Linux x86_64 CLI,
-            Windows x64 CLI.
+            Artifacts (CLI + GUI on all three OS): universal2 macOS CLI + MediaInfo.app (arm64 +
+            x86_64), Linux x86_64 CLI + GUI AppImage, Windows x64 CLI + GUI.
 
-            Pinned: ZenLib ${{ env.ZENLIB_REF }}, MediaInfoLib ${{ env.MEDIAINFOLIB_REF }},
+            Pinned: ZenLib ${{ env.ZENLIB_REF }}, MediaInfoLib ${{ env.MEDIAINFOLIB_REPO }}@${{ env.MEDIAINFOLIB_REF }},
             MediaInfo ${{ env.MEDIAINFO_REF }}.
 
             macOS binaries are ad-hoc signed (not notarized). Clear the quarantine xattr before use:
